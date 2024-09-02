@@ -3,7 +3,7 @@
 : <<- __License
 MIT License
 
-Copyright (c) 2020-2022 zawa-ch.
+Copyright (c) 2020-2024 zawa-ch.
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -24,2520 +24,2552 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 __License
 
-version()
-{
-	cat <<- __EOF
+__main() {
+version() {
+	cat <<-__EOF
 	mcsvutils - Minecraft server commandline utilities
-	version 0.5.3 2022-03-04
-	Copyright 2020-2022 zawa-ch.
+	version 1.0.0-beta1 2024-__-__
+	Copyright 2020-2024 zawa-ch.
+	This program is provided under the MIT License.
 	__EOF
 }
 
-SUBCOMMANDS=("version" "usage" "help" "check" "profile" "server" "image" "spigot")
+## constants ------------------------ ##
 
-usage()
-{
+local -r VERSION_MANIFEST_LOCATION='https://launchermeta.mojang.com/mc/game/version_manifest.json'
+local -r SPIGOT_BUILDTOOLS_LOCATION='https://hub.spigotmc.org/jenkins/job/BuildTools/lastSuccessfulBuild/artifact/target/BuildTools.jar'
+local -r PROFILE_VERSION=3
+local -r REPO_VERSION=2
+
+## Variables ------------------------ ##
+
+# Minecraft server image repository
+local MCSVUTILS_IMAGE_REPOSITORY="$MCSVUTILS_IMAGE_REPOSITORY"
+[ -n "$MCSVUTILS_IMAGE_REPOSITORY" ] || {
+	if [ -n "$XDG_DATA_HOME" ]; then
+		MCSVUTILS_IMAGE_REPOSITORY="$XDG_DATA_HOME/mcsvutils/versions"
+	else
+		MCSVUTILS_IMAGE_REPOSITORY="$HOME/.local/share/mcsvutils/versions"
+	fi
+}
+MCSVUTILS_IMAGE_REPOSITORY="$(readlink -f "$MCSVUTILS_IMAGE_REPOSITORY")"
+local -r MCSVUTILS_IMAGE_REPOSITORY
+# mcsvutils runtime directory
+local MCSVUTILS_RUNTIME="$MCSVUTILS_RUNTIME"
+[ -n "$MCSVUTILS_RUNTIME" ] || {
+	if [ -n "$XDG_STATE_HOME" ]; then
+		MCSVUTILS_RUNTIME="$XDG_STATE_HOME/mcsvutils/versions"
+	else
+		MCSVUTILS_RUNTIME="$HOME/.local/state/mcsvutils"
+	fi
+}
+MCSVUTILS_RUNTIME="$(readlink -f "$MCSVUTILS_RUNTIME")"
+local -r MCSVUTILS_RUNTIME
+
+## Help ----------------------------- ##
+
+local -r allowed_subcommands=("profile" "server" "image" "piston" "spigot" "version" "help" "usage")
+local -r requirement_commands=("cat" "mkfifo" "mktemp" "readlink" "basename" "bash" "jq" "wget" "curl")
+usage() {
 	cat <<- __EOF
-	使用法: $0 <サブコマンド> ...
-	使用可能なサブコマンド: ${SUBCOMMANDS[@]}
+	usage: $0 <subcommand> ...
+	subcommands: ${allowed_subcommands[@]}
 	__EOF
 }
-
-help()
-{
+help() {
+	version
 	cat <<- __EOF
-	  profile  サーバーインスタンスのプロファイルを管理する
-	  server   サーバーインスタンスを管理する
-	  image    Minecraftサーバーイメージを管理する
-	  spigot   CraftBukkit/Spigotサーバーイメージを管理する
-	  check    このスクリプトの動作要件を満たしているかチェックする
-	  version  現在のバージョンを表示して終了
-	  usage    使用法を表示する
-	  help     このヘルプを表示する
 
-	各コマンドの詳細なヘルプは各コマンドに--helpオプションを付けてください。
+	usage: $0 <subcommand> ...
+	subcommands: ${allowed_subcommands[@]}
+	  profile  Manage profiles
+	  server   Manage server instance
+	  image    Manage Minecraft server image repository
+	  piston   Manage Minecraft vanilla server images
+	  spigot   Manage CraftBukkit/Spigot server images
+	  version  Show version
+	  help     Show this help
+	  usage    Show usage
 
-	すべてのサブコマンドに対し、次のオプションが使用できます。
-	  --help | -h 各アクションのヘルプを表示する
-	  --usage     各アクションの使用法を表示する
-	  --          以降のオプションのパースを行わない
+	For detailed help on each subcommand, add the --help option to subcommand.
+
+	The following options are available for all subcommands:
+	--help | -h Show help
+	--usage     Show usage
+	--          Do not parse subsequent options
+
+	This script runs the following commands:
+	  ${requirement_commands[@]}
+	In environments where these commands cannot be executed, almost all operations cannot be performed.
 	__EOF
 }
 
-## Const -------------------------------
-readonly VERSION_MANIFEST_LOCATION='https://launchermeta.mojang.com/mc/game/version_manifest.json'
-readonly SPIGOT_BUILDTOOLS_LOCATION='https://hub.spigotmc.org/jenkins/job/BuildTools/lastSuccessfulBuild/artifact/target/BuildTools.jar'
-readonly RESPONCE_POSITIVE=0
-readonly RESPONCE_NEGATIVE=1
-readonly RESPONCE_ERROR=2
-readonly DATA_VERSION=2
-readonly REPO_VERSION=1
-SCRIPT_LOCATION="$(dirname "$(readlink -f "$0")")" || {
-	echo "mcsvutils: [E] スクリプトが置かれているディレクトリを検出できませんでした。" >&2
-	exit $RESPONCE_ERROR
-}
-readonly SCRIPT_LOCATION
-## -------------------------------------
+## Functions ------------------------ ##
 
-## Variables ---------------------------
-# 一時ディレクトリ設定
-# 一時ディレクトリの場所を設定します。
-# 通常は"/tmp"で問題ありません。
-[ -z "$TEMP" ] && readonly TEMP="/tmp"
-# Minecraftバージョン管理ディレクトリ設定
-# Minecraftバージョンの管理を行うためのディレクトリを設定します。
-[ -z "$MCSVUTILS_IMAGEREPOSITORY_LOCATION" ] && readonly MCSVUTILS_IMAGEREPOSITORY_LOCATION="$SCRIPT_LOCATION/versions"
-## -------------------------------------
-
-echo_invalid_flag()
-{
-	echo "mcsvutils: [W] 無効なオプション $1 が指定されています" >&2
-	echo "通常の引数として読み込ませる場合は先に -- を使用してください" >&2
+assert_precond() {
+	suplessed_cmd() { "$@" >/dev/null 2>/dev/null; }
+	on_failure() { echo "mcsvutils: A required packages are not installed." >&2; return 2; }
+	suplessed_cmd bash --version || { on_failure; return; }
+	suplessed_cmd jq --version || { on_failure; return; }
+	suplessed_cmd wget --version || { on_failure; return; }
+	suplessed_cmd curl --version || { on_failure; return; }
+	return 0
 }
 
-oncheckfail()
-{
-	cat >&2 <<- __EOF
-	mcsvutils: [E] 動作要件のチェックに失敗しました。必要なパッケージがインストールされているか確認してください。
-	    このスクリプトを実行するために必要なソフトウェアは以下のとおりです:
-	    bash sudo wget curl jq screen
-	__EOF
+ask_or_no() {
+	echo -n "${1}${1:+ }[y/N]: "
+	read -r ans
+	[ "$ans" == "y" ] || [ "$ans" == "Y" ] || [ "$ans" == "yes" ] || [ "$ans" == "Yes" ] || [ "$ans" == "YES" ]
 }
 
-# エラー出力にログ出力
-# $1..: echoする内容
-echoerr()
-{
-	echo "$*" >&2
+process_stat() {
+	jq -Rc -f <(cat <<<'capture("(?<pid>[0-9]+) \\((?<tcomm>.*)\\) (?<state>[RSDZT]) (?<ppid>[0-9]+) (?<pgrp>[0-9]+) (?<sid>[0-9]+) (?<tty_nr>[0-9]+) (?<tty_pgrp>[0-9]+) (?<flags>[0-9]+) (?<min_flt>[0-9]+) (?<cmin_flt>[0-9]+) (?<maj_flt>[0-9]+) (?<cmaj_flt>[0-9]+) (?<utime>[0-9]+) (?<stime>[0-9]+) (?<cutime>[0-9]+) (?<cstime>[0-9]+) (?<priority>[0-9]+) (?<nice>[0-9]+) (?<num_threads>[0-9]+) (?<it_real_value>[0-9]+) (?<start_time>[0-9]+) (?<vsize>[0-9]+) (?<rss>[0-9]+) (?<rsslim>[0-9]+) (?<start_code>[0-9]+) (?<end_code>[0-9]+) (?<start_stack>[0-9]+) (?<esp>[0-9]+) (?<eip>[0-9]+) (?<pending>[0-9]+) (?<blocked>[0-9]+) (?<sigign>[0-9]+) (?<sigcatch>[0-9]+) [0-9]+ 0 0 (?<exit_signal>[0-9]+) (?<task_cpu>[0-9]+) (?<rt_priority>[0-9]+) (?<policy>[0-9]+) (?<blkio_ticks>[0-9]+) (?<gtime>[0-9]+) (?<cgtime>[0-9]+) (?<start_data>[0-9]+) (?<end_data>[0-9]+) (?<start_blk>[0-9]+) (?<arg_start>[0-9]+) (?<arg_end>[0-9]+) (?<env_start>[0-9]+) (?<env_end>[0-9]+) (?<exit_code>[0-9]+)")|map_values(if test("[0-9]+") then tonumber else . end)') "/proc/$1/stat"
 }
 
-# 指定ユーザーでコマンドを実行
-# $1: ユーザー
-# $2..: コマンド
-as_user()
-{
-	local user="$1"
-	shift
-	if [ "$(whoami)" = "$user" ]; then
-		bash -c -- "$*"
-	else
-		sudo -sHu "$user" bash -c -- "$*"
-	fi
+fetch_piston_manifest() {
+	curl -s "$VERSION_MANIFEST_LOCATION"
 }
 
-# 指定ユーザーでスクリプトを実行
-# $1: ユーザー
-# note: 標準入力にコマンドを流すことでスクリプトを実行できる
-as_user_script()
-{
-	local user="$1"
-	if [ "$(whoami)" = "$user" ]; then
-		bash
-	else
-		sudo -u "$user" -sH
-	fi
+load_json_file() {
+	[ $# -ge 1 ] || { echo "mcsvutils: File not specified." >&2; return 2; }
+	jq -c '.' -- "$1"
 }
 
-# スクリプトの動作要件チェック
-check()
-{
-	check_installed()
-	{
-		local result_out
-		result_out="$(bash -c "$1 --version" 2>&1 >/dev/null)" || bash -c "$1 --help" >/dev/null 2>/dev/null || {
-			local result=$?
-			echo "$result_out" >&2
-			return $result
-		}
+load_json_stdin() {
+	jq -c '.'
+}
+
+integrity_errstr() {
+	local ec;	ec=$(cat)
+	case "$ec" in
+	OK)	;;
+	JSON_READ_ERROR)	echo "Input is not JSON";;
+	JSON_CONTEXT_INVALID)	echo "Unable to determine context";;
+	PROFILE_CONTEXT_ERROR)	echo "A non-profile context was detected";;
+	PROFILE_VERSION_INVALID)	echo "Unable to determine profile context";;
+	PROFILE_UPGRADE_NEEDED)	echo "Profile version outdated";;
+	PROFILE_VERSION_UNSUPPORTED)	echo "Unsupported profile version";;
+	PROFILE_REQUIRED_ELEMENT_MISSING)	echo "Required element is missing";;
+	PROFILE_ELEMENT_TYPE_ERROR)	echo "Invalid combination of element and type";;
+	PROFILE_EMPTY_STRING)	echo "An empty string was detected in an element that does not allow empty strings";;
+	REPOSITORY_CONTEXT_ERROR)	echo "A non-repository context was detected";;
+	REPOSITORY_VERSION_INVALID)	echo "Unable to determine repository context";;
+	REPOSITORY_UPGRADE_NEEDED)	echo "Repository version outdated";;
+	REPOSITORY_VERSION_UNSUPPORTED)	echo "Unsupported repository version";;
+	REPOSITORY_REQUIRED_ELEMENT_MISSING)	echo "Required element is missing";;
+	REPOSITORY_ELEMENT_TYPE_ERROR)	echo "Invalid combination of element and type";;
+	REPOSITORY_EMPTY_STRING)	echo "An empty string was detected in an element that does not allow empty strings";;
+	*)	echo "An unknown error has occurred";;
+	esac
+}
+
+profile_check_integrity() {
+	local profile; profile=$(load_json_stdin 2>/dev/null) || { echo "JSON_READ_ERROR"; return 1; }
+	local r; r=$(echo "$profile" | jq -r --argjson profile_version "$PROFILE_VERSION" '. as $profile | (if type=="object" then null else "JSON_CONTEXT_INVALID" end) // (if has("@context") then null else (if (.version|type=="number" and .>=1 and .<= 2) then "PROFILE_UPGRADE_NEEDED" else "JSON_CONTEXT_INVALID" end) end) // (."@context" | if type=="object" then null else "JSON_CONTEXT_INVALID" end) // (if ."@context".name=="mcsvutils.profile" then null else "PROFILE_CONTEXT_ERROR" end) // (."@context".version | if type=="number" then null else "PROFILE_VERSION_INVALID" end) // (."@context".version | if .==$profile_version then null elif . < $profile_version then "PROFILE_UPGRADE_NEEDED" else "PROFILE_VERSION_UNSUPPORTED" end) // (if ([has("servicename"), has("imagetag")]|all) then null else "PROFILE_REQUIRED_ELEMENT_MISSING" end) // (if ([(.servicename|type=="string"), (.imagetag|type=="string"), (.jvm|type== "null" or type=="array"), (.jvm|type=="array" and (map(type!="string")|any)|not), (.arguments|type=="null" or type=="array"), (.arguments|type=="array" and (map(type!="string")|any)|not), (.cwd|type=="null" or type=="string"), (.jre|type=="null" or type=="string")]|all) then null else "PROFILE_ELEMENT_TYPE_ERROR" end) // (if ([(.servicename|length > 0), (.imagetag|length > 0), (.cwd|type=="string" and length<=0|not), (.jre|type=="string" and length<=0|not)]|all) then null else "PROFILE_EMPTY_STRING" end) // "OK"')
+	echo "$r"
+	[ "$r" == "OK" ]
+}
+
+profile_check_integrity_v2() {
+	local profile; profile=$(load_json_stdin 2>/dev/null) || { echo "JSON_READ_ERROR"; return 1; }
+	local r; r=$(echo "$profile" | jq -r --argjson profile_version "$PROFILE_VERSION" '. as $profile | (if type=="object" then null else "PROFILE_CONTEXT_ERROR" end) // (.version | if type=="number" then null else "PROFILE_VERSION_INVALID" end) // (.version | if .==2 then null elif .<2 then "PROFILE_UPGRADE_NEEDED" else "PROFILE_VERSION_UNSUPPORTED" end) // (if ([has("servicename"), has("executejar") or has("imagetag")]|all) then null else "PROFILE_REQUIRED_ELEMENT_MISSING" end) // if ([(.name|type=="string"), (.executejar|type=="string" or type=="null"), (.imagetag|type=="string" or type=="null"), (.executejar|type=="string") or (.imagetag|type=="string"), (.options|type=="array"), (.args|type=="array")]|all) then null else "PROFILE_ELEMENT_TYPE_ERROR" end) // (if ([(.name|length>0), (((.executejar//"")+(.imagetag//""))|length>0)]|all) then null else "PROFILE_EMPTY_STRING" end) // "OK"')
+	echo "$r"
+	[ "$r" == "OK" ]
+}
+
+profile_check_integrity_v1() {
+	local profile; profile=$(load_json_stdin 2>/dev/null) || { echo "JSON_READ_ERROR"; return 1; }
+	local r; r=$(echo "$profile" | jq -r --argjson profile_version "$PROFILE_VERSION" '. as $profile | (if type=="object" then null else "PROFILE_CONTEXT_ERROR" end) // (.version | if type=="number" then null else "PROFILE_VERSION_INVALID" end) // (.version | if .==1 then null else "PROFILE_VERSION_UNSUPPORTED" end) // (if ([has("name"), has("execute")]|all) then null else "PROFILE_REQUIRED_ELEMENT_MISSING" end) // if ([(.name|type=="string"), (.execute|type=="string"), (.options|type=="array"), (.args|type=="array")]|all) then null else "PROFILE_ELEMENT_TYPE_ERROR" end) // (if ([(.name|length>0), (.execute|length>0)]|all) then null else "PROFILE_EMPTY_STRING" end) // "OK"')
+	echo "$r"
+	[ "$r" == "OK" ]
+}
+
+profile_upgrade() {
+	local profile;	profile=$(load_json_stdin 2>/dev/null) || return 1
+	local profile_err;	profile_err=$(echo "$profile" | profile_check_integrity)
+	[ "$profile_err" != "OK" ] || { echo "$profile"; return 0; }
+	[ "$profile_err" == "PROFILE_UPGRADE_NEEDED" ] || return 1
+	local p_ver;	p_ver=$(echo "$profile" | jq -c '.version')
+	# shellcheck disable=SC2016
+	cat_jq_upgradev2_code() { cat <<<'if .version == 1 then . else ("Invalid version.\n" | error) end | if has("name") and (.name|type=="string") then . else ("Schema error.\n" | error) end | if has("execute") and (.execute|type=="string") then . else ("Schema error.\n" | error) end | { version: 2, servicename: .name, imagetag: null, executejar: .execute, options, arguments: .args, cwd: (.cwd|if type == "string" then . else null end), jre: (.javapath|if type == "string" then . else null end), owner: (.owner|if type == "string" then . else null end) }'; }
+	# shellcheck disable=SC2016
+	cat_jq_upgradev3_code() { cat <<<'if .version == 2 then . else ("Invalid version.\n" | error) end | if has("servicename") and (.servicename|type=="string") and ((has("imagetag") and (.imagetag|type=="string" and length>0) and (has("executejar") and (.executejar|type!="null")|not)) or (has("executejar") and (.executejar|type=="string" and length>0) and (has("imagetag") and (.imagetag|type!="null")|not))) then . else ("Schema error.\n" | error) end | { "@context": { name: "mcsvutils.profile", version: 3}, servicename, imagetag, jvm: (.options|if type=="array" then map(select(type=="string")) else [] end), arguments: (.arguments|if type=="array" then map(select(type=="string")) else [] end), cwd: (.cwd|if type == "string" then . else null end), jre: (.jre|if type == "string" then . else null end) }'; }
+	while [ "$p_ver" -lt "$PROFILE_VERSION" ]; do
+	case "$p_ver" in
+		"1")	profile="$(echo "$profile" | jq -c -f <(cat_jq_upgradev2_code))" || return;;
+		"2")	profile="$(echo "$profile" | jq -c -f <(cat_jq_upgradev3_code))" || return;;
+	esac
+		p_ver=$(( p_ver + 1 ))
+	done
+	echo "$profile"
+}
+
+imagerepo_mkdir() {
+	# shellcheck disable=SC2015
+	[ -d "$MCSVUTILS_IMAGE_REPOSITORY" ] && [ -w "$MCSVUTILS_IMAGE_REPOSITORY" ] && [ -O "$MCSVUTILS_IMAGE_REPOSITORY" ] && [ -x "$MCSVUTILS_IMAGE_REPOSITORY" ] || {
+		mkdir -p "$MCSVUTILS_IMAGE_REPOSITORY" && chmod -R u=rwX,go=rX "$MCSVUTILS_IMAGE_REPOSITORY" || { echo "mcsvutils: Could not configure repository." >&2; return 1; }
 	}
-	local RESULT=0
-	check_installed sudo || RESULT=$RESPONCE_NEGATIVE
-	check_installed wget || RESULT=$RESPONCE_NEGATIVE
-	check_installed curl || RESULT=$RESPONCE_NEGATIVE
-	check_installed jq || RESULT=$RESPONCE_NEGATIVE
-	check_installed screen || RESULT=$RESPONCE_NEGATIVE
-	return $RESULT
 }
 
-# Minecraftバージョンマニフェストファイルの取得
-VERSION_MANIFEST=
-fetch_mcversions() { VERSION_MANIFEST=$(curl -s "$VERSION_MANIFEST_LOCATION") || { echoerr "mcsvutils: [E] Minecraftバージョンマニフェストファイルのダウンロードに失敗しました"; return $RESPONCE_ERROR; } }
-
-profile_data=""
-
-# プロファイルデータを開く
-# 指定されたプロファイルデータを開き、 profile_data 変数に格納する
-# プロファイルデータの指定がなかった場合、標準入力から取得する
-profile_open()
-{
-	[ $# -lt 1 ] && { profile_data="$(jq -c '.')"; return; }
-	local profile_file="$1"
-	[ -e "$profile_file" ] || { echoerr "mcsvutils: [E] 指定されたファイル $profile_file が見つかりません"; return $RESPONCE_ERROR; }
-	profile_data="$(jq -c '.' "$profile_file")"
-	return
+imagerepo_load() {
+	init_repo() { jq -nc --argjson version "$REPO_VERSION" '{"@context": {name: "mcsvutils.repository", version: $version}, images: [], aliases: []}'; }
+	# shellcheck disable=SC2015
+	[ -d "$MCSVUTILS_IMAGE_REPOSITORY" ] &&  [ -f "$MCSVUTILS_IMAGE_REPOSITORY/repository.json" ] || { init_repo; return; }
+	# shellcheck disable=SC2015
+	[ -O "$MCSVUTILS_IMAGE_REPOSITORY" ] && [ -x "$MCSVUTILS_IMAGE_REPOSITORY" ] && [ -r "$MCSVUTILS_IMAGE_REPOSITORY/repository.json" ] || { echo "mcsvutils: Could not configure repository folder." >&2; return 1; }
+	jq -c '.' -- "$MCSVUTILS_IMAGE_REPOSITORY/repository.json"
 }
 
-profile_get_version() { { echo "$profile_data" | jq -r ".version | numbers"; } || { echoerr "mcsvutils: [E] プロファイルのパース中に問題が発生しました"; return $RESPONCE_ERROR; } }
-profile_get_servicename() { { echo "$profile_data" | jq -r ".servicename | strings"; } || { echoerr "mcsvutils: [E] プロファイルのパース中に問題が発生しました"; return $RESPONCE_ERROR; } }
-profile_get_imagetag() { { echo "$profile_data" | jq -r ".imagetag | strings"; } || { echoerr "mcsvutils: [E] プロファイルのパース中に問題が発生しました"; return $RESPONCE_ERROR; } }
-profile_get_executejar() { { echo "$profile_data" | jq -r ".executejar | strings"; } || { echoerr "mcsvutils: [E] プロファイルのパース中に問題が発生しました"; return $RESPONCE_ERROR; } }
-profile_get_options() { { echo "$profile_data" | jq -r ".options[]"; } || { echoerr "mcsvutils: [E] プロファイルのパース中に問題が発生しました"; return $RESPONCE_ERROR; } }
-profile_get_arguments() { { echo "$profile_data" | jq -r ".arguments[]"; } || { echoerr "mcsvutils: [E] プロファイルのパース中に問題が発生しました"; return $RESPONCE_ERROR; } }
-profile_get_cwd() { { echo "$profile_data" | jq -r ".cwd | strings"; } || { echoerr "mcsvutils: [E] プロファイルのパース中に問題が発生しました"; return $RESPONCE_ERROR; } }
-profile_get_jre() { { echo "$profile_data" | jq -r ".jre | strings"; } || { echoerr "mcsvutils: [E] プロファイルのパース中に問題が発生しました"; return $RESPONCE_ERROR; } }
-profile_get_owner() { { echo "$profile_data" | jq -r ".owner | strings"; } || { echoerr "mcsvutils: [E] プロファイルのパース中に問題が発生しました"; return $RESPONCE_ERROR; } }
-profile_check_integrity()
-{
-	local version; version="$(profile_get_version)" || return $RESPONCE_NEGATIVE
-	[ "$version" != "$DATA_VERSION" ] && { echoerr "mcsvutils: [E] 対応していないプロファイルのバージョン($version)です"; return $RESPONCE_NEGATIVE; }
-	local servicename; servicename="$(profile_get_servicename)" || return $RESPONCE_NEGATIVE
-	[ -z "$servicename" ] && { echoerr "mcsvutils: [E] 必要な要素 servicename がありません"; return $RESPONCE_NEGATIVE; }
-	local imagetag; imagetag="$(profile_get_imagetag)" || return $RESPONCE_NEGATIVE
-	local executejar; executejar="$(profile_get_executejar)" || return $RESPONCE_NEGATIVE
-	{ { [ -z "$imagetag" ] && [ -z "$executejar" ]; } || { [ -n "$imagetag" ] && [ -n "$executejar" ]; } } && { echoerr "mcsvutils: [E] imagetag と executejar の要素はどちらかひとつだけが存在する必要があります"; return $RESPONCE_ERROR; }
-	return $RESPONCE_POSITIVE
+imagerepo_save() {
+	local temp_repos
+	# shellcheck disable=SC2317
+	cleanup() {
+		[ -n "$temp_repos" ] && [ -e "$temp_repos" ] && rm -f -- "${temp_repos:?}"
+	}
+	trap cleanup RETURN
+	imagerepo_mkdir || return
+	# shellcheck disable=SC2015
+	[ -f "$MCSVUTILS_IMAGE_REPOSITORY/repository.json" ] && [ -w "$MCSVUTILS_IMAGE_REPOSITORY/repository.json" ] || {
+		touch "$MCSVUTILS_IMAGE_REPOSITORY/repository.json" && chmod u=rw,go=r "$MCSVUTILS_IMAGE_REPOSITORY/repository.json" || { echo "mcsvutils: Could not configure repository." >&2; return 1; }
+	}
+	temp_repos=$(mktemp -p "$MCSVUTILS_IMAGE_REPOSITORY") && chmod u=rw,go=r "$temp_repos" && jq -c '.' >"$temp_repos" || return
+	mv --exchange -fT "$temp_repos" "$MCSVUTILS_IMAGE_REPOSITORY/repository.json"
 }
 
-repository_is_exist() { [ -e "$MCSVUTILS_IMAGEREPOSITORY_LOCATION/repository.json" ]; }
-repository_open() { jq -c '.' "$MCSVUTILS_IMAGEREPOSITORY_LOCATION/repository.json"; }
-repository_get_version() { jq -r ".version | numbers" || return $RESPONCE_ERROR; }
-repository_find_image_keys_fromname()
-{
-	local item=$1
-	jq -c ".images | map_values(select(.name == \"$item\")) | keys"
-}
-repository_is_exist_image()
-{
-	local item=$1
-	[ "$(jq -r ".images | has(\"$item\")")" == "true" ]
-}
-repository_get_image()
-{
-	local item=$1
-	jq -c ".images.\"$item\""
-}
-repository_image_get_name() { jq -r ".name"; }
-repository_image_get_path() { jq -r ".path"; }
-repository_check_integrity()
-{
-	local data
-	data="$(jq -c '.')" || { echoerr "mcsvutils: [E] イメージリポジトリのデータは有効なJSONではありません"; return $RESPONCE_NEGATIVE; }
-	local version; version="$(echo "$data" | repository_get_version)" || { echoerr "mcsvutils: [E] イメージリポジトリのバージョンを読み取れませんでした"; return $RESPONCE_NEGATIVE; }
-	[ "$version" -ne "$REPO_VERSION" ] && { echoerr "mcsvutils: [E] イメージリポジトリのバージョンの互換性がありません"; return $RESPONCE_NEGATIVE; }
-	return $RESPONCE_POSITIVE
+imagerepo_dbnuke() {
+	rm -rf -- "$MCSVUTILS_IMAGE_REPOSITORY"
 }
 
-# Subcommands --------------------------
-action_profile()
-{
-	# Usage/Help ---------------------------
-	local SUBCOMMANDS=("help" "info" "create" "upgrade")
-	usage()
-	{
+imagerepo_check_integrity() {
+	local repo; repo=$(jq -c '.') || { echo "JSON_READ_ERROR"; return 1; }
+	local r; r=$(echo "$repo" | jq -r --argjson repository_version "$REPO_VERSION" '. as $repo | (if type=="object" then null else "JSON_CONTEXT_INVALID" end) // (if ."@context"|type=="object" then null else (if (.version|type=="number" and .==1) then "REPOSITORY_UPGRADE_NEEDED" else "JSON_CONTEXT_INVALID" end) end) // (if ."@context".name=="mcsvutils.repository" then null else "REPOSITORY_CONTEXT_ERROR" end) // (if ."@context".version|type=="number" then null else "REPOSITORY_VERSION_INVALID" end) // (if ."@context".version==$repository_version then null elif ."@context".version<$repository_version then "REPOSITORY_UPGRADE_NEEDED" else "REPOSITORY_VERSION_UNSUPPORTED" end) // (if [has("images"), has("aliases")]|all then null else "REPOSITORY_REQUIRED_ELEMENT_MISSING" end) // (if [(.images|type=="array" and all(type=="object")), (.aliases|type=="array" and all(type=="object"))]|all then null else "REPOSITORY_ELEMENT_TYPE_ERROR" end) // (if .images|all([(.id|type=="string"), (.path|type=="string"), (.size|type=="number" or type=="null"), (.sha1|type=="string" or type=="null"), (.sha256|type=="string" or type=="null")]|all) then null else "REPOSITORY_ELEMENT_TYPE_ERROR" end) // (if .aliases|all([(.id|type=="string"), (.reference|type=="string")]|all) then null else "REPOSITORY_ELEMENT_TYPE_ERROR" end) // (if .images|all([(.id|length>0), (.path|length>0)]|all) then null else "REPOSITORY_EMPTY_STRING" end) // (if .aliases|all([(.id|length>0), (.reference|length>0)]|all) then null else "REPOSITORY_EMPTY_STRING" end) // "OK"')
+	echo "$r"
+	[ "$r" == "OK" ]
+}
+
+imagerepo_list_tags() {
+	jq -c '(.images|map(.+{type:"image"}))+(.images as $images|.aliases|map(.+{type:"alias",reference:(.reference as $target|$images|map(select(.id==$target))|if length==1 then .[0] else null end)}))'
+}
+
+imagerepo_tag_is_exist() {
+	imagerepo_list_tags | jq -e --arg tag "$1" 'map(.id)|index($tag)!=null' >/dev/null
+}
+
+imagerepo_get_by_tag() {
+	imagerepo_list_tags | jq -ce --arg query "$1" '(map(.id)|index($query)) as $i|if $i!=null then .[$i] else null end'
+}
+
+imagerepo_id_is_exist() {
+	jq -e --arg query "$1" '.images|map(.id)|index($query)!=null' >/dev/null
+}
+
+imagerepo_get_new_imageid() {
+	local repo;	repo=$(jq -c '.') || return
+	local result
+	for _ in $(seq 255); do
+		result=$(head -c 10 /dev/urandom | base32 | jq -Rr --slurp 'split("\n")|map(ascii_downcase)|join("")')
+		echo "$repo" | imagerepo_tag_is_exist "$result" || break
+	done
+	echo "$repo" | { ! imagerepo_tag_is_exist "$result"; } || {
+		echo "mcsvutils: The number of image ID generation attempts has been reached, but no meaningful image ID could be generated." >&2; return 1;
+	}
+	echo "$result"
+}
+
+imagerepo_normalize_path() {
+	( cd "$MCSVUTILS_IMAGE_REPOSITORY" 2>/dev/null && readlink -m "$1" )
+}
+
+server_check_running() {
+	local runtime="$MCSVUTILS_RUNTIME/$servicename"
+	[ -d "$runtime" ] || return
+	[ -f "$runtime/status" ] || return
+	jq -c '.' "$runtime/status" >/dev/null || return
+	local server_pid
+	server_pid=$(jq -r '.pid' "$runtime/status") || return
+	[ -d "/proc/$server_pid" ] || return
+	local pstat
+	pstat=$(process_stat "$server_pid")
+	# shellcheck disable=SC2016
+	jq -ec -f <(cat <<<'.pid==$pstat.[0].pid and .start_time==$pstat.[0].start_time') --slurpfile pstat <(echo "$pstat") "$runtime/status" >/dev/null
+}
+
+## Subcommands ---------------------- ##
+
+subcommand_profile() {
+	## profile/Help --------------------- ##
+
+	local -r allowed_subcommands=("info" "create" "update" "help" "usage")
+	usage() {
 		cat <<- __EOF
-		使用法: $0 profile <サブコマンド>
-		使用可能なサブコマンド: ${SUBCOMMANDS[@]}
+		usage: $0 profile <subcommand> ...
+		subcommands: ${allowed_subcommands[@]}
 		__EOF
 	}
-	help()
-	{
+	help() {
 		cat <<- __EOF
-		profile はMinecraftサーバーのプロファイルを管理します。
+		mcsvutils profile - Manage profiles
 
-		使用可能なサブコマンドは以下のとおりです。
+		usage: $0 profile <subcommand> ...
+		subcommands: ${allowed_subcommands[@]}
+		  info     Show profile infomation
+		  create   Create profile
+		  upgrade  Update profile format
+		  help     Show this help
+		  usage    Show usage
 
-		  help     このヘルプを表示する
-		  info     プロファイルの内容を表示する
-		  create   プロファイルを作成する
-		  upgrade  プロファイルを新しいフォーマットにする
+		For detailed help on each subcommand, add the --help option to subcommand.
+
+		options:
+		  --help | -h Show help
+		  --usage     Show usage
+		  --          Do not parse subsequent options
 		__EOF
 	}
+	## profile/Subcommands -------------- ##
 
-	# Subcommands --------------------------
-	action_profile_info()
-	{
-		usage()
-		{
+	subcommand_profile_info() {
+		## profile/info/Help ---------------- ##
+
+		usage() {
 			cat <<- __EOF
-			使用法: $0 profile info <プロファイル>
+			usage: $0 profile info [<options> ...] [<profile>]
+			profile: path to profile
 			__EOF
 		}
-		help()
-		{
+		help() {
 			cat <<- __EOF
-			profile info はMinecraftサーバーのプロファイルの情報を取得します。
-			プロファイルにはプロファイルデータが記述されたファイルのパスを指定します。
-			ファイルの指定がなかった場合は、標準入力から読み込まれます。
+			mcsvutils profile info - Show profile infomation
+
+			usage: $0 profile info [<options> ...] [<profile>]
+			profile: path to profile
+			  If no file is specified, it will be read from standard input.
+			
+			options:
+			  --stdin | -i
+			    Read from standard input regardless of arguments
+			    Exclusive with --file option
+			  --file | -p
+			    Abort as an error instead of reading from standard input when no file is specified
+			    Exclusive with --stdin option
+			  --help | -h
+			    Show help
+			  --usage
+			    Show usage
 			__EOF
 		}
+
+		## profile/info/Analyze args -------- ##
+
+		local flag_stdin=
+		local flag_file=
 		local args=()
-		local helpflag=''
-		local usageflag=''
-		while (( $# > 0 ))
-		do
-			case $1 in
-				--help) 	helpflag='--help'; shift;;
-				--usage)	usageflag='--usage'; shift;;
-				--)	shift; break;;
-				--*)	echo_invalid_flag "$1"; shift;;
-				-*)
-					[[ "$1" =~ h ]] && { helpflag='-h'; }
-					shift
-					;;
-				*)
-					args=("${args[@]}" "$1")
-					shift
-					;;
-			esac
-		done
-		while (( $# > 0 ))
-		do
-			args=("${args[@]}" "$1")
-			shift
-		done
-
-		[ -n "$helpflag" ] && { version; echo; usage; echo; help; return; }
-		[ -n "$usageflag" ] && { usage; return; }
-		check || { oncheckfail; return $RESPONCE_ERROR; }
-
-		if [ ${#args[@]} -gt 0 ]; then profile_open "${args[0]}" || return; else profile_open || return; fi
-		profile_check_integrity || { echoerr "mcsvutils: [E] 指定されたデータは正しいプロファイルデータではありません"; return $RESPONCE_ERROR; }
-		echo "サービス名: $(profile_get_servicename)"
-		[ -n "$(profile_get_owner)" ] && echo "サービス所有者: $(profile_get_owner)"
-		[ -n "$(profile_get_cwd)" ] && echo "作業ディレクトリ: $(profile_get_cwd)"
-		[ -n "$(profile_get_imagetag)" ] && echo "呼び出しイメージ: $(profile_get_imagetag)"
-		[ -n "$(profile_get_executejar)" ] && echo "実行jarファイル: $(profile_get_executejar)"
-		[ -n "$(profile_get_jre)" ] && echo "Java環境: $(profile_get_jre)"
-		[ -n "$(profile_get_options)" ] && echo "Java呼び出しオプション: $(profile_get_options)"
-		[ -n "$(profile_get_arguments)" ] && echo "デフォルト引数: $(profile_get_arguments)"
-		return $RESPONCE_POSITIVE
-	}
-	action_profile_create()
-	{
-		usage()
-		{
-			cat <<- __EOF
-			使用法:
-			$0 profile create --name <名前> --image <バージョン> [オプション]
-			$0 profile create --name <名前> --execute <jarファイル> [オプション]
-			__EOF
-		}
-		help()
-		{
-			cat <<- __EOF
-			profile create はMinecraftサーバーのプロファイルを作成します。
-
-			--profile | -p
-			    基となるプロファイルデータのファイルを指定します。
-			--input | -i
-			    基となるプロファイルデータを標準入力から取得します。
-			--out | -o
-			    出力先ファイル名を指定します。
-			    指定がなかった場合は標準出力に書き出されます。
-			--name | -n (必須)
-			    インスタンスの名前を指定します。
-			--image | -r
-			    ここで指定された名前のイメージをリポジトリ中から検索して実行します。
-			    --imageオプションまたは--executeオプションのどちらかを必ずひとつ指定する必要があります。
-			    また、--executeオプションと同時に使用することはできません。
-			--execute | -e
-			    サーバーとして実行するjarファイルを指定します。
-			    --imageオプションまたは--executeオプションのどちらかを必ずひとつ指定する必要があります。
-			    また、--imageオプションと同時に使用することはできません。
-			--owner | -u
-			    実行時のユーザーを指定します。
-			--cwd
-			    実行時の作業ディレクトリを指定します。
-			--java
-			    javaの環境を指定します。
-			    このオプションを指定するとインストールされているjavaとは異なるjavaを使用することができます。
-			--option
-			    実行時にjreに渡すオプションを指定します。
-			    複数回呼び出された場合、呼び出された順に連結されます。
-			--args
-			    実行時にjarに渡されるデフォルトの引数を指定します。
-			    複数回呼び出された場合、呼び出された順に連結されます。
-			__EOF
-		}
-		local args=()
-		local profileflag=''
-		local inputflag=''
-		local outflag=''
-		local nameflag=''
-		local imageflag=''
-		local executeflag=''
-		local ownerflag=''
-		local cwdflag=''
-		local javaflag=''
-		local optionflag=()
-		local argsflag=()
-		local helpflag=''
-		local usageflag=''
-		while (( $# > 0 ))
-		do
-			case $1 in
-				--profile)	shift; profileflag="$1"; shift;;
-				--input)	shift; inputflag="$1"; shift;;
-				--out)  	shift; outflag="$1"; shift;;
-				--name) 	shift; nameflag="$1"; shift;;
-				--image)	shift; imageflag="$1"; shift;;
-				--execute)	shift; executeflag="$1"; shift;;
-				--owner)	shift; ownerflag="$1"; shift;;
-				--cwd)  	shift; cwdflag="$1"; shift;;
-				--java) 	shift; javaflag="$1"; shift;;
-				--option)	shift; optionflag+=("$1"); shift;;
-				--args) 	shift; argsflag+=("$1"); shift;;
-				--help) 	helpflag='--help'; shift;;
-				--usage)	usageflag='--usage'; shift;;
-				--)	shift; break;;
-				--*)	echo_invalid_flag "$1"; shift;;
-				-*)
-					local end_of_analyze=1
-					[[ "$1" =~ i ]] && { inputflag='-i'; }
-					[[ "$1" =~ h ]] && { helpflag='-h'; }
-					[ "$end_of_analyze" -ne 0 ] && [[ "$1" =~ p ]] && { if [[ "$1" =~ p$ ]]; then shift; profileflag="$1"; end_of_analyze=0; else profileflag=''; fi; }
-					[ "$end_of_analyze" -ne 0 ] && [[ "$1" =~ o ]] && { if [[ "$1" =~ o$ ]]; then shift; outflag="$1"; end_of_analyze=0; else outflag=''; fi; }
-					[ "$end_of_analyze" -ne 0 ] && [[ "$1" =~ n ]] && { if [[ "$1" =~ n$ ]]; then shift; nameflag="$1"; end_of_analyze=0; else nameflag=''; fi; }
-					[ "$end_of_analyze" -ne 0 ] && [[ "$1" =~ r ]] && { if [[ "$1" =~ r$ ]]; then shift; imageflag="$1"; end_of_analyze=0; else imageflag=''; fi; }
-					[ "$end_of_analyze" -ne 0 ] && [[ "$1" =~ e ]] && { if [[ "$1" =~ e$ ]]; then shift; executeflag="$1"; end_of_analyze=0; else executeflag=''; fi; }
-					[ "$end_of_analyze" -ne 0 ] && [[ "$1" =~ u ]] && { if [[ "$1" =~ u$ ]]; then shift; ownerflag="$1"; end_of_analyze=0; else ownerflag=''; fi; }
-					shift
-					;;
-				*)
-					args=("${args[@]}" "$1")
-					shift
-					;;
-			esac
-		done
-		while (( $# > 0 ))
-		do
-			args=("${args[@]}" "$1")
-			shift
-		done
-
-		[ -n "$helpflag" ] && { version; echo; usage; echo; help; return; }
-		[ -n "$usageflag" ] && { usage; return; }
-		check || { oncheckfail; return $RESPONCE_ERROR; }
-
-		local result="{}"
-		[ -n "$profileflag" ] && [ -n "$inputflag" ] && { echoerr "mcsvutils: [E] --profileと--inputは同時に指定できません"; return $RESPONCE_ERROR; }
-		[ -n "$profileflag" ] && { { profile_open "$profileflag" && profile_check_integrity && result="$profile_data"; } || return $RESPONCE_ERROR; }
-		[ -n "$inputflag" ] && { { profile_open && profile_check_integrity && result="$profile_data"; } || return $RESPONCE_ERROR; }
-		[ -z "$profileflag" ] && [ -z "$inputflag" ] && [ -z "$nameflag" ] && { echoerr "mcsvutils: [E] --nameは必須です"; return $RESPONCE_ERROR; }
-		result=$(echo "$result" | jq -c --argjson version "$DATA_VERSION" '.version |= $version') || { echoerr "mcsvutils: [E] データの生成に失敗しました"; return $RESPONCE_ERROR; }
-		[ -n "$nameflag" ] && { result=$(echo "$result" | jq -c --arg servicename "$nameflag" '.servicename |= $servicename') || { echoerr "mcsvutils: [E] データの生成に失敗しました"; return $RESPONCE_ERROR; } }
-		{ [ -z "$profileflag" ] && [ -z "$inputflag" ] && [ -z "$executeflag" ] && [ -z "$imageflag" ]; } && { echoerr "mcsvutils: [E] --executeまたは--imageは必須です"; return $RESPONCE_ERROR; }
-		{ [ -z "$profileflag" ] && [ -z "$inputflag" ] && [ -n "$executeflag" ] && [ -n "$imageflag" ]; } && { echoerr "mcsvutils: [E] --executeと--imageは同時に指定できません"; return $RESPONCE_ERROR; }
-		[ -n "$executeflag" ] && { result=$(echo "$result" | jq -c --arg executejar "$executeflag" '.executejar |= $executejar | .imagetag |= null' ) || { echoerr "mcsvutils: [E] データの生成に失敗しました"; return $RESPONCE_ERROR; } }
-		[ -n "$imageflag" ] && { result=$(echo "$result" | jq -c --arg imagetag "$imageflag" '.imagetag |= $imagetag | .executejar |= null' ) || { echoerr "mcsvutils: [E] データの生成に失敗しました"; return $RESPONCE_ERROR; } }
-		local options="[]"
-		[ ${#optionflag[@]} -ne 0 ] && { for item in "${optionflag[@]}"; do options=$(echo "$options" | jq -c ". + [ \"$item\" ]"); done }
-		result=$(echo "$result" | jq -c --argjson options "$options" '.options |= $options') || { echoerr "mcsvutils: [E] データの生成に失敗しました"; return $RESPONCE_ERROR; }
-		local arguments="[]"
-		[ ${#argsflag[@]} -ne 0 ] && { for item in "${argsflag[@]}"; do arguments=$(echo "$arguments" | jq -c ". + [ \"$item\" ]"); done }
-		result=$(echo "$result" | jq -c --argjson arguments "$arguments" '.arguments |= $arguments') || { echoerr "mcsvutils: [E] データの生成に失敗しました"; return $RESPONCE_ERROR; }
-		if [ -n "$cwdflag" ]; then
-			result=$(echo "$result" | jq -c --arg cwd "$cwdflag" '.cwd |= $cwd') || { echoerr "mcsvutils: [E] データの生成に失敗しました"; return $RESPONCE_ERROR; }
-		else
-			result=$(echo "$result" | jq -c '.cwd |= null') || { echoerr "mcsvutils: [E] データの生成に失敗しました"; return $RESPONCE_ERROR; }
-		fi
-		if [ -n "$javaflag" ]; then
-			result=$(echo "$result" | jq -c --arg jre "$javaflag" '.jre |= $jre') || { echoerr "mcsvutils: [E] データの生成に失敗しました"; return $RESPONCE_ERROR; }
-		else
-			result=$(echo "$result" | jq -c '.jre |= null') || { echoerr "mcsvutils: [E] データの生成に失敗しました"; return $RESPONCE_ERROR; }
-		fi
-		if [ -n "$ownerflag" ]; then
-			result=$(echo "$result" | jq -c --arg owner "$ownerflag" '.owner |= $owner') || { echoerr "mcsvutils: [E] データの生成に失敗しました"; return $RESPONCE_ERROR; }
-		else
-			result=$(echo "$result" | jq -c '.owner |= null') || { echoerr "mcsvutils: [E] データの生成に失敗しました"; return $RESPONCE_ERROR; }
-		fi
-		profile_data="$result"
-		if [ -n "$outflag" ]; then
-			echo "$profile_data" > "$outflag"
-		else
-			echo "$profile_data"
-		fi
-	}
-	action_profile_upgrade()
-	{
-		usage()
-		{
-			cat <<- __EOF
-			使用法:
-			$0 profile upgrade [オプション] [プロファイル]
-			__EOF
-		}
-		help()
-		{
-			cat <<- __EOF
-			profile upgrade はMinecraftサーバーのプロファイルのバージョンを最新にします。
-			プロファイルにはプロファイルデータが記述されたファイルのパスを指定します。
-			ファイルの指定がなかった場合は、標準入力から読み込まれます。
-
-			--out | -o
-			    出力先ファイル名を指定します。
-			    指定がなかった場合は標準出力に書き出されます。
-			__EOF
-		}
-		local args=()
-		local outflag=''
-		local helpflag=''
-		local usageflag=''
-		while (( $# > 0 ))
-		do
-			case $1 in
-				--out)  	shift; outflag="$1"; shift;;
-				--help) 	helpflag='--help'; shift;;
-				--usage)	usageflag='--usage'; shift;;
-				--)	shift; break;;
-				--*)	echo_invalid_flag "$1"; shift;;
-				-*)
-					[[ "$1" =~ h ]] && { helpflag='-h'; }
-					[[ "$1" =~ o ]] && { if [[ "$1" =~ o$ ]]; then shift; outflag="$1"; else outflag=''; fi; }
-					shift
-					;;
-				*)
-					args=("${args[@]}" "$1")
-					shift
-					;;
-			esac
-		done
-		while (( $# > 0 ))
-		do
-			args=("${args[@]}" "$1")
-			shift
-		done
-
-		[ -n "$helpflag" ] && { version; echo; usage; echo; help; return; }
-		[ -n "$usageflag" ] && { usage; return; }
-		check || { oncheckfail; return $RESPONCE_ERROR; }
-
-		if [ "${#args[@]}" -ge 1 ]
-			then { profile_open "${args[0]}" || return $RESPONCE_ERROR; }
-			else { profile_open || return $RESPONCE_ERROR; }
-		fi
-		local version=''
-		local servicename=''
-		local imagetag=''
-		local executejar=''
-		local owner=''
-		local cwd=''
-		local jre=''
-		local options=''
-		local arguments=''
-		version="$(profile_get_version)" || return $RESPONCE_ERROR
-		echoerr "mcsvutils: 読み込まれたプロファイルのバージョン: $version"
-		case "$version" in
-			"$DATA_VERSION") {
-				if profile_check_integrity
-					then echoerr "mcsvutils: [W] このプロファイルはすでに最新です。更新の必要はありません。"; return $RESPONCE_NEGATIVE;
-					else return $RESPONCE_ERROR;
-				fi
-			};;
-			"1") {
-				servicename=$(echo "$profile_data" | jq -r ".name | strings") || { echoerr "mcsvutils: [E] プロファイルのパース中に問題が発生しました"; return $RESPONCE_ERROR; }
-				[ -z "$servicename" ] && { echoerr "mcsvutils: [E] .name要素が空であるか、正しい型ではありません"; return $RESPONCE_ERROR; }
-				executejar=$(echo "$profile_data" | jq -r ".execute | strings") || { echoerr "mcsvutils: [E] プロファイルのパース中に問題が発生しました"; return $RESPONCE_ERROR; }
-				[ -z "$executejar" ] && { echoerr "mcsvutils: [E] .execute要素が空であるか、正しい型ではありません"; return $RESPONCE_ERROR; }
-				owner=$(echo "$profile_data" | jq -r ".owner | strings") || { echoerr "mcsvutils: [E] プロファイルのパース中に問題が発生しました"; return $RESPONCE_ERROR; }
-				cwd=$(echo "$profile_data" | jq -r ".cwd | strings") || { echoerr "mcsvutils: [E] プロファイルのパース中に問題が発生しました"; return $RESPONCE_ERROR; }
-				jre=$(echo "$profile_data" | jq -r ".javapath | strings") || { echoerr "mcsvutils: [E] プロファイルのパース中に問題が発生しました"; return $RESPONCE_ERROR; }
-				options=$(echo "$profile_data" | jq -c ".options") || { echoerr "mcsvutils: [E] プロファイルのパース中に問題が発生しました"; return $RESPONCE_ERROR; }
-				arguments=$(echo "$profile_data" | jq -c ".args") || { echoerr "mcsvutils: [E] プロファイルのパース中に問題が発生しました"; return $RESPONCE_ERROR; }
-			};;
-			*) {
-				echoerr "mcsvutils: [E] サポートされていないバージョン $version が選択されました。"
-				return $RESPONCE_ERROR
-			};;
-		esac
-
-		local result="{}"
-		result=$(echo "$result" | jq -c --argjson version "$DATA_VERSION" '.version |= $version') || { echoerr "mcsvutils: [E] データの生成に失敗しました"; return $RESPONCE_ERROR; }
-		[ -z "$servicename" ] && { echoerr "mcsvutils: [E] サービス名が空です"; return $RESPONCE_ERROR; }
-		result=$(echo "$result" | jq -c --arg servicename "$servicename" '.servicename |= $servicename') || { echoerr "mcsvutils: [E] データの生成に失敗しました"; return $RESPONCE_ERROR; }
-		{ [ -z "$imagetag" ] && [ -z "$executejar" ]; } && { echoerr "mcsvutils: [E] executejarとimagetagがどちらも空です"; return $RESPONCE_ERROR; }
-		{ [ -n "$imagetag" ] && [ -n "$executejar" ]; } && { echoerr "mcsvutils: [E] executejarとimagetagは同時に存在できません"; return $RESPONCE_ERROR; }
-		[ -n "$imagetag" ] && { result=$(echo "$result" | jq -c --arg imagetag "$imagetag" '.imagetag |= $imagetag | .executejar |= null' ) || { echoerr "mcsvutils: [E] データの生成に失敗しました"; return $RESPONCE_ERROR; } }
-		[ -n "$executejar" ] && { result=$(echo "$result" | jq -c --arg executejar "$executejar" '.executejar |= $executejar | .imagetag |= null' ) || { echoerr "mcsvutils: [E] データの生成に失敗しました"; return $RESPONCE_ERROR; } }
-		if [ -n "$owner" ]; then
-			result=$(echo "$result" | jq -c --arg owner "$owner" '.owner |= $owner') || { echoerr "mcsvutils: [E] データの生成に失敗しました"; return $RESPONCE_ERROR; }
-		else
-			result=$(echo "$result" | jq -c '.owner |= null') || { echoerr "mcsvutils: [E] データの生成に失敗しました"; return $RESPONCE_ERROR; }
-		fi
-		if [ -n "$cwd" ]; then
-			result=$(echo "$result" | jq -c --arg cwd "$cwd" '.cwd |= $cwd') || { echoerr "mcsvutils: [E] データの生成に失敗しました"; return $RESPONCE_ERROR; }
-		else
-			result=$(echo "$result" | jq -c '.cwd |= null') || { echoerr "mcsvutils: [E] データの生成に失敗しました"; return $RESPONCE_ERROR; }
-		fi
-		if [ -n "$jre" ]; then
-			result=$(echo "$result" | jq -c --arg jre "$jre" '.jre |= $jre') || { echoerr "mcsvutils: [E] データの生成に失敗しました"; return $RESPONCE_ERROR; }
-		else
-			result=$(echo "$result" | jq -c '.jre |= null') || { echoerr "mcsvutils: [E] データの生成に失敗しました"; return $RESPONCE_ERROR; }
-		fi
-		result=$(echo "$result" | jq -c --argjson options "$options" '.options |= $options') || { echoerr "mcsvutils: [E] データの生成に失敗しました"; return $RESPONCE_ERROR; }
-		result=$(echo "$result" | jq -c --argjson arguments "$arguments" '.arguments |= $arguments') || { echoerr "mcsvutils: [E] データの生成に失敗しました"; return $RESPONCE_ERROR; }
-		profile_data="$result"
-		if [ -n "$outflag" ]; then
-			echo "$profile_data" > "$outflag"
-		else
-			echo "$profile_data"
-		fi
-	}
-
-	# Analyze arguments --------------------
-	local subcommand=""
-	if [[ $1 =~ -.* ]] || [ "$1" = "" ]; then
-		subcommand="none"
-		while (( $# > 0 ))
-		do
-			case $1 in
-				--help) 	helpflag='--help'; shift;;
-				--usage)	usageflag='--usage'; shift;;
-				--*)	echo_invalid_flag "$1"; shift;;
-				-*)
-					[[ "$1" =~ h ]] && { helpflag='-h'; }
-					shift
-					;;
-				*)	break;;
-			esac
-		done
-	else
-		for item in "${SUBCOMMANDS[@]}"
-		do
-			[ "$item" == "$1" ] && {
-				subcommand="$item"
-				shift
-				break
-			}
-		done
-	fi
-	[ -z "$subcommand" ] && { echoerr "mcsvutils: [E] 無効なサブコマンドを指定しました。"; usage >&2; return $RESPONCE_ERROR; }
-	{ [ "$subcommand" == "help" ] || [ -n "$helpflag" ]; } && { version; echo; usage; echo; help; return; }
-	[ -n "$usageflag" ] && { usage; return; }
-	[ "$subcommand" == "none" ] && { echoerr "mcsvutils: [E] サブコマンドが指定されていません。"; echoerr "$0 profile help で詳細なヘルプを表示します。"; usage >&2; return $RESPONCE_ERROR; }
-	"action_profile_$subcommand" "$@"
-}
-
-action_server()
-{
-	# Usage/Help ---------------------------
-	local SUBCOMMANDS=("help" "status" "start" "stop" "attach" "command")
-	usage()
-	{
-		cat <<- __EOF
-		使用法: $0 server <サブコマンド>
-		使用可能なサブコマンド: ${SUBCOMMANDS[@]}
-		__EOF
-	}
-	help()
-	{
-		cat <<- __EOF
-		server はMinecraftサーバーのインスタンスを管理します。
-
-		使用可能なサブコマンドは以下のとおりです。
-
-		  help     このヘルプを表示する
-		  status   インスタンスの状態を問い合わせる
-		  start    インスタンスを開始する
-		  stop     インスタンスを停止する
-		  attach   インスタンスのコンソールにアタッチする
-		  command  インスタンスにコマンドを送信する
-		__EOF
-	}
-
-	# Minecraftコマンドを実行
-	# $1: サーバー所有者
-	# $2: サーバーのセッション名
-	# $3..: 送信するコマンド
-	dispatch_mccommand()
-	{
-		local owner="$1"
-		shift
-		local servicename="$1"
-		shift
-		as_user "$owner" "screen -p 0 -S $servicename -X eval 'stuff \"$*\"\015'"
-	}
-
-	# Subcommands --------------------------
-	action_server_status()
-	{
-		usage()
-		{
-			cat <<- __EOF
-			使用法:
-			$0 server status -p <プロファイル> [オプション]
-			$0 server status -n <名前> [オプション]
-			__EOF
-		}
-		help()
-		{
-			cat <<- __EOF
-			server status はMinecraftサーバーの状態を問い合わせます。
-			コマンドの実行には名前、もしくはプロファイルのどちらかを指定する必要があります。
-			いずれの指定もなかった場合は、標準入力からプロファイルを取得します。
-
-			--profile | -p
-			    インスタンスを実行するための情報を記したプロファイルの場所を指定します。
-			    名前を指定していない場合のみ必須です。
-			    名前を指定している場合はこのオプションを指定することはできません。
-			--name | -n
-			    インスタンスの名前を指定します。
-			    プロファイルを指定しない場合のみ必須です。
-			    プロファイルを指定している場合はこのオプションを指定することはできません。
-			--owner | -u
-			    実行時のユーザーを指定します。
-			    このオプションを指定するとプロファイルの設定を上書きします。
-
-			指定したMinecraftサーバーが起動している場合は $RESPONCE_POSITIVE 、起動していない場合は $RESPONCE_NEGATIVE が返されます。
-			__EOF
-		}
-		local args=()
-		local profileflag=''
-		local nameflag=''
-		local ownerflag=''
-		local helpflag=''
-		local usageflag=''
-		while (( $# > 0 ))
-		do
-			case $1 in
-				--profile) 	shift; profileflag="$1"; shift;;
-				--name) 	shift; nameflag="$1"; shift;;
-				--owner)	shift; ownerflag="$1"; shift;;
-				--help) 	helpflag='--help'; shift;;
-				--usage)	usageflag='--usage'; shift;;
-				--)	shift; break;;
-				--*)	echo_invalid_flag "$1"; shift;;
-				-*)
-					local end_of_analyze=1
-					[[ "$1" =~ h ]] && { helpflag='-h'; }
-					[ "$end_of_analyze" -ne 0 ] && [[ "$1" =~ p ]] && { if [[ "$1" =~ p$ ]]; then shift; profileflag="$1"; end_of_analyze=0; else profileflag=''; fi; }
-					[ "$end_of_analyze" -ne 0 ] && [[ "$1" =~ n ]] && { if [[ "$1" =~ n$ ]]; then shift; nameflag="$1"; end_of_analyze=0; else nameflag=''; fi; }
-					[ "$end_of_analyze" -ne 0 ] && [[ "$1" =~ u ]] && { if [[ "$1" =~ u$ ]]; then shift; ownerflag="$1"; end_of_analyze=0; else ownerflag=''; fi; }
-					shift
-					;;
-				*)
-					args=("${args[@]}" "$1")
-					shift
-					;;
-			esac
-		done
-		while (( $# > 0 ))
-		do
-			args=("${args[@]}" "$1")
-			shift
-		done
-
-		[ -n "$helpflag" ] && { version; echo; usage; echo; help; return; }
-		[ -n "$usageflag" ] && { usage; return; }
-		check || { oncheckfail; return $RESPONCE_ERROR; }
-
-		local servicename=''
-		local owner=''
-		if [ -n "$nameflag" ]; then
-			[ -n "$profileflag" ] && { echoerr "mcsvutils: [E] プロファイルを指定した場合、名前の指定は無効です"; return $RESPONCE_ERROR; }
-			servicename=$nameflag
-		else
-			if [ -n "$profileflag" ]; then profile_open "$profileflag" || return; else profile_open || return; fi
-			profile_check_integrity || { echoerr "mcsvutils: [E] プロファイルのロードに失敗したため、中止します"; return $RESPONCE_ERROR; }
-			servicename="$(profile_get_servicename)" || return $RESPONCE_ERROR
-			owner="$(profile_get_owner)" || return $RESPONCE_ERROR
-		fi
-		[ -z "$servicename" ] && { echoerr "mcsvctrl: [E] インスタンスの名前が指定されていません"; return $RESPONCE_ERROR; }
-		[ -n "$ownerflag" ] && owner=$ownerflag
-		[ -z "$owner" ] && owner="$(whoami)"
-		if as_user "$owner" "screen -list \"$servicename\"" > /dev/null
-		then
-			echo "mcsvutils: ${servicename} は起動しています"
-			return $RESPONCE_POSITIVE
-		else
-			echo "mcsvutils: ${servicename} は起動していません"
-			return $RESPONCE_NEGATIVE
-		fi
-	}
-	action_server_start()
-	{
-		usage()
-		{
-			cat <<- __EOF
-			使用法:
-			$0 server start -p <プロファイル> [オプション] [引数]
-			$0 server start -n <名前> -r <バージョン> [オプション] [引数]
-			$0 server start -n <名前> -e <jarファイル> [オプション] [引数]
-			__EOF
-		}
-		help()
-		{
-			cat <<- __EOF
-			server start はMinecraftサーバーのインスタンスを開始します。
-			インスタンスの開始には名前とバージョン、もしくはプロファイルのどちらかを指定する必要があります。
-			いずれの指定もなかった場合は、標準入力からプロファイルを取得します。
-
-			--profile | -p
-			    インスタンスを実行するための情報を記したプロファイルの場所を指定します。
-			    名前・バージョンをともに指定していない場合のみ必須です。
-			    名前・バージョンを指定している場合はこのオプションを指定することはできません。
-			--name | -n
-			    インスタンスの名前を指定します。
-			    プロファイルを指定しない場合のみ必須です。
-			    プロファイルを指定している場合はこのオプションを指定することはできません。
-			--image | -r
-			    ここで指定された名前のイメージをリポジトリ中から検索して実行します。
-			    プロファイルを指定しない場合、--imageオプションまたは--executeオプションのどちらかを必ずひとつ指定する必要があります。
-			    --executeオプションと同時に使用することはできません。
-			    また、プロファイルを指定している場合はこのオプションを指定することはできません。
-			--execute | -e
-			    サーバーとして実行するjarファイルを指定します。
-			    プロファイルを指定しない場合、--imageオプションまたは--executeオプションのどちらかを必ずひとつ指定する必要があります。
-			    --imageオプションと同時に使用することはできません。
-			    また、プロファイルを指定している場合はこのオプションを指定することはできません。
-			--owner | -u
-			    実行時のユーザーを指定します。
-			    このオプションを指定するとプロファイルの設定を上書きします。
-			--cwd
-			    実行時の作業ディレクトリを指定します。
-			    このオプションを指定するとプロファイルの設定を上書きします。
-			--java
-			    javaの環境を指定します。
-			    この引数を指定するとインストールされているjavaとは異なるjavaを使用することができます。
-			    このオプションを指定するとプロファイルの設定を上書きします。
-			--option
-			    実行時にjavaに渡すオプションを指定します。
-			    このオプションを指定するとプロファイルの設定を上書きします。
-			--attach | -a
-			    インスタンスの開始時にコンソールにアタッチします。
-			__EOF
-		}
-		local args=()
-		local profileflag=''
-		local nameflag=''
-		local imageflag=''
-		local executeflag=''
-		local ownerflag=''
-		local cwdflag=''
-		local javaflag=''
-		local optionflag=()
-		local attachflag=''
-		local helpflag=''
-		local usageflag=''
-		while (( $# > 0 ))
-		do
-			case $1 in
-				--profile) 	shift; profileflag="$1"; shift;;
-				--name) 	shift; nameflag="$1"; shift;;
-				--image)	shift; imageflag="$1"; shift;;
-				--execute)	shift; executeflag="$1"; shift;;
-				--owner)	shift; ownerflag="$1"; shift;;
-				--cwd)  	shift; cwdflag="$1"; shift;;
-				--java) 	shift; javaflag="$1"; shift;;
-				--option)	shift; optionflag+=("$1"); shift;;
-				--attach)	attachflag='--attach'; shift;;
-				--help) 	helpflag='--help'; shift;;
-				--usage)	usageflag='--usage'; shift;;
-				--)	shift; break;;
-				--*)	echo_invalid_flag "$1"; shift;;
-				-*)
-					local end_of_analyze=1
-					[[ "$1" =~ a ]] && { attachflag='-a'; }
-					[[ "$1" =~ h ]] && { helpflag='-h'; }
-					[ "$end_of_analyze" -ne 0 ] && [[ "$1" =~ p ]] && { if [[ "$1" =~ p$ ]]; then shift; profileflag="$1"; end_of_analyze=0; else profileflag=''; fi; }
-					[ "$end_of_analyze" -ne 0 ] && [[ "$1" =~ n ]] && { if [[ "$1" =~ n$ ]]; then shift; nameflag="$1"; end_of_analyze=0; else nameflag=''; fi; }
-					[ "$end_of_analyze" -ne 0 ] && [[ "$1" =~ r ]] && { if [[ "$1" =~ r$ ]]; then shift; imageflag="$1"; end_of_analyze=0; else imageflag=''; fi; }
-					[ "$end_of_analyze" -ne 0 ] && [[ "$1" =~ e ]] && { if [[ "$1" =~ e$ ]]; then shift; executeflag="$1"; end_of_analyze=0; else executeflag=''; fi; }
-					[ "$end_of_analyze" -ne 0 ] && [[ "$1" =~ u ]] && { if [[ "$1" =~ u$ ]]; then shift; ownerflag="$1"; end_of_analyze=0; else ownerflag=''; fi; }
-					shift
-					;;
-				*)
-					args=("${args[@]}" "$1")
-					shift
-					;;
-			esac
-		done
-		while (( $# > 0 ))
-		do
-			args=("${args[@]}" "$1")
-			shift
-		done
-
-		[ -n "$helpflag" ] && { version; echo; usage; echo; help; return; }
-		[ -n "$usageflag" ] && { usage; return; }
-		check || { oncheckfail; return $RESPONCE_ERROR; }
-
-		local servicename=''
-		local imagetag=''
-		local executejar=''
-		local options=()
-		local arguments=()
-		local cwd=''
-		local jre=''
-		local owner=''
-		if [ -n "$nameflag" ] || [ -n "$imageflag" ] || [ -n "$executeflag" ]; then
-			[ -n "$profileflag" ] && { echoerr "mcsvutils: [E] プロファイルを指定した場合、名前・バージョンおよびjarファイルの指定は無効です"; return $RESPONCE_ERROR; }
-			servicename=$nameflag
-			[ -n "$imageflag" ] && [ -n "$executeflag" ] && { echoerr "mcsvutils: [E] バージョンとjarファイルは同時に指定できません"; return $RESPONCE_ERROR; }
-			[ -n "$imageflag" ] && imagetag=$imageflag
-			[ -n "$executeflag" ] && executejar=$executeflag
-		else
-			if [ -n "$profileflag" ]; then profile_open "$profileflag" || return; else profile_open || return; fi
-			profile_check_integrity || { echoerr "mcsvutils: [E] プロファイルのロードに失敗したため、中止します"; return $RESPONCE_ERROR; }
-			servicename="$(profile_get_servicename)" || return $RESPONCE_ERROR
-			imagetag="$(profile_get_imagetag)" || return $RESPONCE_ERROR
-			executejar="$(profile_get_executejar)" || return $RESPONCE_ERROR
-			for item in $(profile_get_options); do options+=("$item"); done
-			for item in $(profile_get_arguments); do arguments+=("$item"); done
-			cwd="$(profile_get_cwd)" || return $RESPONCE_ERROR
-			jre="$(profile_get_jre)" || return $RESPONCE_ERROR
-			owner="$(profile_get_owner)" || return $RESPONCE_ERROR
-		fi
-		[ -z "$servicename" ] && { echoerr "mcsvutils: [E] インスタンスの名前が指定されていません"; return $RESPONCE_ERROR; }
-		[ -z "$imagetag" ] && [ -z "$executejar" ] && { echoerr "mcsvutils: [E] 実行するjarファイルが指定されていません"; return $RESPONCE_ERROR; }
-		[ -n "$imagetag" ] && {
-			local repository
-			repository="$(repository_open)" || { echoerr "mcsvutils: [E] イメージリポジトリを開くことができませんでした"; return $RESPONCE_ERROR; }
-			echo "$repository" | repository_check_integrity || { echoerr "mcsvutils: [E] イメージリポジトリを開くことができませんでした"; return $RESPONCE_ERROR; }
-			local item
-			if echo "$repository" | repository_is_exist_image "$imagetag"; then
-				item="$imagetag"
-			else
-				local found_image
-				found_image="$(echo "$repository" | repository_find_image_keys_fromname "$imagetag")"
-				[ "$(echo "$found_image" | jq -r 'length')" -le 0 ] && { echoerr "mcsvutils: [E] 合致するイメージが見つかりませんでした"; return $RESPONCE_ERROR; }
-				[ "$(echo "$found_image" | jq -r 'length')" -gt 1 ] && { echoerr "mcsvutils: [E] 合致するイメージが複数見つかりました、指定するためにはIDを指定してください"; return $RESPONCE_ERROR; }
-				item="$(echo "$found_image" | jq -r '.[0]')"
-			fi
-			executejar="$(echo "$repository" | repository_get_image "${item:?}" | repository_image_get_path)"
-		}
-		[ "${#optionflag[@]}" -ne 0 ] && options=("${optionflag[@]}")
-		[ "${#args[@]}" -ne 0 ] && arguments=("${args[@]}")
-		[ -n "$cwdflag" ] && cwd=$cwdflag
-		[ -n "$javaflag" ] && jre=$javaflag
-		[ -n "$ownerflag" ] && owner=$ownerflag
-		[ -z "$cwd" ] && cwd="./"
-		[ -z "$jre" ] && jre="java"
-		[ -z "$owner" ] && owner="$(whoami)"
-		local invocations=()
-		invocations=("${invocations[@]}" "$jre")
-		[ "${#options[@]}" -ne 0 ] && invocations=("${invocations[@]}" "${options[@]}")
-		invocations=("${invocations[@]}" "-jar" "$executejar")
-		[ "${#arguments[@]}" -ne 0 ] && invocations=("${invocations[@]}" "${arguments[@]}")
-		as_user "$owner" screen -list "$servicename" > /dev/null && { echo "mcsvutils: ${servicename} は起動済みです" >&2; return $RESPONCE_NEGATIVE; }
-		if [ -z "$attachflag" ]; then
-			echo "mcsvutils: $servicename を起動しています"
-			(
-				cd "$cwd" || { echo "mcsvutils: [E] $cwd に入れませんでした" >&2; return $RESPONCE_ERROR; }
-				as_user "$owner" screen -dmS "$servicename" "${invocations[@]}"
-			) || return $RESPONCE_ERROR
-			sleep .5
-			if as_user "$owner" screen -list "$servicename" > /dev/null; then
-				echo "mcsvutils: ${servicename} が起動しました"
-				return $RESPONCE_POSITIVE
-			else
-				echo "mcsvutils: [E] ${servicename} を起動できませんでした" >&2
-				return $RESPONCE_ERROR
-			fi
-		else
-			(
-				cd "$cwd" || { echo "mcsvutils: [E] $cwd に入れませんでした" >&2; return $RESPONCE_ERROR; }
-				as_user "$owner" screen -mS "$servicename" "${invocations[@]}"
-			) || return $RESPONCE_ERROR
-			return
-		fi
-	}
-	action_server_stop()
-	{
-		usage()
-		{
-			cat <<- __EOF
-			使用法:
-			$0 server stop -p <プロファイル> [オプション]
-			$0 server stop -n <名前> [オプション]
-			__EOF
-		}
-		help()
-		{
-			cat <<- __EOF
-			server stop はMinecraftサーバーのインスタンスを停止します。
-			インスタンスの停止には名前、もしくはプロファイルのどちらかを指定する必要があります。
-			いずれの指定もなかった場合は、標準入力からプロファイルを取得します。
-
-			--profile | -p
-			    インスタンスを実行するための情報を記したプロファイルの場所を指定します。
-			    名前を指定していない場合のみ必須です。
-			    名前を指定している場合はこのオプションを指定することはできません。
-			--name | -n
-			    インスタンスの名前を指定します。
-			    プロファイルを指定しない場合のみ必須です。
-			    プロファイルを指定している場合はこのオプションを指定することはできません。
-			--owner | -u
-			    実行時のユーザーを指定します。
-			    このオプションを指定するとプロファイルの設定を上書きします。
-			__EOF
-		}
-		local args=()
-		local profileflag=''
-		local nameflag=''
-		local ownerflag=''
-		local helpflag=''
-		local usageflag=''
-		while (( $# > 0 ))
-		do
-			case $1 in
-				--profile)	shift; profileflag="$1"; shift;;
-				--name) 	shift; nameflag="$1"; shift;;
-				--owner)	shift; ownerflag="$1"; shift;;
-				--help) 	helpflag='--help'; shift;;
-				--usage)	usageflag='--usage'; shift;;
-				--)	shift; break;;
-				--*)	echo_invalid_flag "$1"; shift;;
-				-*)
-					local end_of_analyze=1
-					[[ "$1" =~ h ]] && { helpflag='-h'; }
-					[ "$end_of_analyze" -ne 0 ] && [[ "$1" =~ p ]] && { if [[ "$1" =~ p$ ]]; then shift; profileflag="$1"; end_of_analyze=0; else profileflag=''; fi; }
-					[ "$end_of_analyze" -ne 0 ] && [[ "$1" =~ n ]] && { if [[ "$1" =~ n$ ]]; then shift; nameflag="$1"; end_of_analyze=0; else nameflag=''; fi; }
-					[ "$end_of_analyze" -ne 0 ] && [[ "$1" =~ u ]] && { if [[ "$1" =~ u$ ]]; then shift; ownerflag="$1"; end_of_analyze=0; else ownerflag=''; fi; }
-					shift
-					;;
-				*)
-					args=("${args[@]}" "$1")
-					shift
-					;;
-			esac
-		done
-		while (( $# > 0 ))
-		do
-			args=("${args[@]}" "$1")
-			shift
-		done
-
-		[ -n "$helpflag" ] && { version; echo; usage; echo; help; return; }
-		[ -n "$usageflag" ] && { usage; return; }
-		check || { oncheckfail; return $RESPONCE_ERROR; }
-
-		local servicename=''
-		local owner=''
-		if [ -n "$nameflag" ]; then
-			[ -n "$profileflag" ] && { echoerr "mcsvutils: [E] プロファイルを指定した場合、名前の指定は無効です"; return $RESPONCE_ERROR; }
-			servicename=$nameflag
-		else
-			if [ -n "$profileflag" ]; then profile_open "$profileflag" || return; else profile_open || return; fi
-			profile_check_integrity || { echoerr "mcsvutils: [E] プロファイルのロードに失敗したため、中止します"; return $RESPONCE_ERROR; }
-			servicename="$(profile_get_servicename)" || return $RESPONCE_ERROR
-			owner="$(profile_get_owner)" || return $RESPONCE_ERROR
-		fi
-		[ -z "$servicename" ] && { echoerr "mcsvctrl: [E] インスタンスの名前が指定されていません"; return $RESPONCE_ERROR; }
-		[ -n "$ownerflag" ] && owner=$ownerflag
-		[ -z "$owner" ] && owner="$(whoami)"
-		as_user "$owner" "screen -list \"$servicename\"" > /dev/null || { echo "mcsvutils: ${servicename} は起動していません" >&2; return $RESPONCE_NEGATIVE; }
-		echo "mcsvutils: ${servicename} を停止しています"
-		dispatch_mccommand "$owner" "$servicename" stop
-		as_user_script "$owner" <<- __EOF
-		trap 'echo "mcsvutils: SIGINTを検出しました。処理は中断しますが、遅れてサービスが停止する可能性はあります…"; exit $RESPONCE_ERROR' 2
-		while screen -list "$servicename" > /dev/null
-		do
-			sleep 1
-		done
-		__EOF
-		if ! as_user "$owner" "screen -list \"$servicename\"" > /dev/null
-		then
-			echo "mcsvutils: ${servicename} が停止しました"
-			return $RESPONCE_POSITIVE
-		else
-			echo "mcsvutils: [E] ${servicename} が停止しませんでした" >&2
-			return $RESPONCE_ERROR
-		fi
-	}
-	action_server_attach()
-	{
-		usage()
-		{
-			cat <<- __EOF
-			使用法:
-			$0 server attach -p <プロファイル> [オプション]
-			$0 server attach -n <名前> [オプション]
-			__EOF
-		}
-		help()
-		{
-			cat <<- __EOF
-			server attach はMinecraftサーバーのコンソールに接続します。
-			インスタンスのアタッチには名前、もしくはプロファイルのどちらかを指定する必要があります。
-			いずれの指定もなかった場合は、標準入力からプロファイルを取得します。
-
-			--profile | -p
-			    インスタンスを実行するための情報を記したプロファイルの場所を指定します。
-			    名前を指定していない場合のみ必須です。
-			    名前を指定している場合はこのオプションを指定することはできません。
-			--name | -n
-			    インスタンスの名前を指定します。
-			    プロファイルを指定しない場合のみ必須です。
-			    プロファイルを指定している場合はこのオプションを指定することはできません。
-			--owner | -u
-			    実行時のユーザーを指定します。
-			    このオプションを指定するとプロファイルの設定を上書きします。
-
-			接続するコンソールはscreenで作成したコンソールです。
-			そのため、コンソールの操作はscreenでのものと同じです。
-			指定したMinecraftサーバーが起動していない場合は $RESPONCE_NEGATIVE が返されます。
-			__EOF
-		}
-		local args=()
-		local profileflag=''
-		local nameflag=''
-		local ownerflag=''
-		local helpflag=''
-		local usageflag=''
-		while (( $# > 0 ))
-		do
-			case $1 in
-				--profile)	shift; profileflag="$1"; shift;;
-				--name) 	shift; nameflag="$1"; shift;;
-				--owner)	shift; ownerflag="$1"; shift;;
-				--help) 	helpflag='--help'; shift;;
-				--usage)	usageflag='--usage'; shift;;
-				--)	shift; break;;
-				--*)	echo_invalid_flag "$1"; shift;;
-				-*)
-					local end_of_analyze=1
-					[[ "$1" =~ h ]] && { helpflag='-h'; }
-					[ "$end_of_analyze" -ne 0 ] && [[ "$1" =~ p ]] && { if [[ "$1" =~ p$ ]]; then shift; profileflag="$1"; end_of_analyze=0; else profileflag=''; fi; }
-					[ "$end_of_analyze" -ne 0 ] && [[ "$1" =~ n ]] && { if [[ "$1" =~ n$ ]]; then shift; nameflag="$1"; end_of_analyze=0; else nameflag=''; fi; }
-					[ "$end_of_analyze" -ne 0 ] && [[ "$1" =~ u ]] && { if [[ "$1" =~ u$ ]]; then shift; ownerflag="$1"; end_of_analyze=0; else ownerflag=''; fi; }
-					shift
-					;;
-				*)
-					args=("${args[@]}" "$1")
-					shift
-					;;
-			esac
-		done
-		while (( $# > 0 ))
-		do
-			args=("${args[@]}" "$1")
-			shift
-		done
-
-		[ -n "$helpflag" ] && { version; echo; usage; echo; help; return; }
-		[ -n "$usageflag" ] && { usage; return; }
-		check || { oncheckfail; return $RESPONCE_ERROR; }
-
-		local servicename=''
-		local owner=''
-		if [ -n "$nameflag" ]; then
-			[ -n "$profileflag" ] && { echoerr "mcsvutils: [E] プロファイルを指定した場合、名前の指定は無効です"; return $RESPONCE_ERROR; }
-			servicename=$nameflag
-		else
-			if [ -n "$profileflag" ]; then profile_open "$profileflag" || return; else profile_open || return; fi
-			profile_check_integrity || { echoerr "mcsvutils: [E] プロファイルのロードに失敗したため、中止します"; return $RESPONCE_ERROR; }
-			servicename="$(profile_get_servicename)" || return $RESPONCE_ERROR
-			owner="$(profile_get_owner)" || return $RESPONCE_ERROR
-		fi
-		[ -z "$servicename" ] && { echoerr "mcsvctrl: [E] インスタンスの名前が指定されていません"; return $RESPONCE_ERROR; }
-		[ -n "$ownerflag" ] && owner=$ownerflag
-		[ -z "$owner" ] && owner="$(whoami)"
-		as_user "$owner" "screen -list \"$servicename\"" > /dev/null || { echo "mcsvutils: ${servicename} は起動していません"; return $RESPONCE_NEGATIVE; }
-		as_user "$owner" "screen -r \"$servicename\""
-	}
-	action_server_command()
-	{
-		usage()
-		{
-			cat <<- __EOF
-			使用法:
-			$0 server command -p <プロファイル> [オプション] <コマンド>
-			$0 server command -n <名前> [オプション] <コマンド>
-			__EOF
-		}
-		help()
-		{
-			cat <<- __EOF
-			server command はMinecraftサーバーにコマンドを送信します。
-			インスタンスへのコマンド送信には名前、もしくはプロファイルのどちらかを指定する必要があります。
-			いずれの指定もなかった場合は、標準入力からプロファイルを取得します。
-
-			--profile | -p
-			    インスタンスを実行するための情報を記したプロファイルの場所を指定します。
-			    名前を指定していない場合のみ必須です。
-			    名前を指定している場合はこのオプションを指定することはできません。
-			--name | -n
-			    インスタンスの名前を指定します。
-			    プロファイルを指定しない場合のみ必須です。
-			    プロファイルを指定している場合はこのオプションを指定することはできません。
-			--owner | -u
-			    実行時のユーザーを指定します。
-			    このオプションを指定するとプロファイルの設定を上書きします。
-			--cwd
-			    実行時の作業ディレクトリを指定します。
-			    このオプションを指定するとプロファイルの設定を上書きします。
-			__EOF
-		}
-		local args=()
-		local profileflag=''
-		local nameflag=''
-		local ownerflag=''
-		local cwdflag=''
-		local helpflag=''
-		local usageflag=''
-		while (( $# > 0 ))
-		do
-			case $1 in
-				--profile)	shift; profileflag="$1"; shift;;
-				--name) 	shift; nameflag="$1"; shift;;
-				--owner)	shift; ownerflag="$1"; shift;;
-				--cwd)  	shift; cwdflag="$1"; shift;;
-				--help) 	helpflag='--help'; shift;;
-				--usage)	usageflag='--usage'; shift;;
-				--)	shift; break;;
-				--*)	echo_invalid_flag "$1"; shift;;
-				-*)
-					local end_of_analyze=1
-					[[ "$1" =~ h ]] && { helpflag='-h'; }
-					[ "$end_of_analyze" -ne 0 ] && [[ "$1" =~ p ]] && { if [[ "$1" =~ p$ ]]; then shift; profileflag="$1"; end_of_analyze=0; else profileflag=''; fi; }
-					[ "$end_of_analyze" -ne 0 ] && [[ "$1" =~ n ]] && { if [[ "$1" =~ n$ ]]; then shift; nameflag="$1"; end_of_analyze=0; else nameflag=''; fi; }
-					[ "$end_of_analyze" -ne 0 ] && [[ "$1" =~ u ]] && { if [[ "$1" =~ u$ ]]; then shift; ownerflag="$1"; end_of_analyze=0; else ownerflag=''; fi; }
-					shift
-					;;
-				*)
-					args=("${args[@]}" "$1")
-					shift
-					;;
-			esac
-		done
-		while (( $# > 0 ))
-		do
-			args=("${args[@]}" "$1")
-			shift
-		done
-
-		[ -n "$helpflag" ] && { version; echo; usage; echo; help; return; }
-		[ -n "$usageflag" ] && { usage; return; }
-		check || { oncheckfail; return $RESPONCE_ERROR; }
-
-		local servicename=''
-		local cwd=''
-		local owner=''
-		if [ -n "$nameflag" ]; then
-			[ -n "$profileflag" ] && { echoerr "mcsvutils: [E] プロファイルを指定した場合、名前の指定は無効です"; return $RESPONCE_ERROR; }
-			servicename=$nameflag
-		else
-			if [ -n "$profileflag" ]; then profile_open "$profileflag" || return; else profile_open || return; fi
-			profile_check_integrity || { echoerr "mcsvutils: [E] プロファイルのロードに失敗したため、中止します"; return $RESPONCE_ERROR; }
-			servicename="$(profile_get_servicename)" || return $RESPONCE_ERROR
-			owner="$(profile_get_owner)" || return $RESPONCE_ERROR
-			cwd="$(profile_get_cwd)"
-		fi
-		[ -z "$servicename" ] && { echoerr "mcsvctrl: [E] インスタンスの名前が指定されていません"; return $RESPONCE_ERROR; }
-		[ -n "$cwdflag" ] && cwd=$cwdflag
-		[ -n "$ownerflag" ] && owner=$ownerflag
-		[ -z "$cwd" ] && cwd="."
-		[ -z "$owner" ] && owner="$(whoami)"
-		send_command="${args[*]}"
-		as_user "$owner" "screen -list \"$servicename\"" > /dev/null || { echo "mcsvutils: ${servicename} は起動していません"; return $RESPONCE_NEGATIVE; }
-		local pre_log_length
-		[ -e "$cwd" ] && {
-			pre_log_length=$(as_user "$owner" "wc -l \"$cwd/logs/latest.log\"" | awk '{print $1}')
-		}
-		echo "mcsvutils: ${servicename} にコマンドを送信しています..."
-		echo "> $send_command"
-		dispatch_mccommand "$owner" "$servicename" "$send_command"
-		echo "mcsvutils: コマンドを送信しました"
-		[ -e "$cwd" ] && {
-			sleep .1
-			echo "レスポンス:"
-			as_user "$owner" "tail -n $(($(as_user "$owner" "wc -l \"$cwd/logs/latest.log\"" | awk '{print $1}') - pre_log_length)) \"$cwd/logs/latest.log\""
-		}
-		return $RESPONCE_POSITIVE
-	}
-
-	# Analyze arguments --------------------
-	local subcommand=""
-	if [[ $1 =~ -.* ]] || [ "$1" = "" ]; then
-		subcommand="none"
-		while (( $# > 0 ))
-		do
-			case $1 in
-				--help) 	helpflag='--help'; shift;;
-				--usage)	usageflag='--usage'; shift;;
-				--*)	echo_invalid_flag "$1"; shift;;
-				-*)
-					[[ "$1" =~ h ]] && { helpflag='-h'; }
-					shift
-					;;
-				*)	break;;
-			esac
-		done
-	else
-		for item in "${SUBCOMMANDS[@]}"
-		do
-			[ "$item" == "$1" ] && {
-				subcommand="$item"
-				shift
-				break
-			}
-		done
-	fi
-	[ -z "$subcommand" ] && { echoerr "mcsvutils: [E] 無効なサブコマンドを指定しました。"; usage >&2; return $RESPONCE_ERROR; }
-	{ [ "$subcommand" == "help" ] || [ -n "$helpflag" ]; } && { version; echo; usage; echo; help; return; }
-	[ -n "$usageflag" ] && { usage; return; }
-	[ "$subcommand" == "none" ] && { echoerr "mcsvutils: [E] サブコマンドが指定されていません。"; echoerr "$0 server help で詳細なヘルプを表示します。"; usage >&2; return $RESPONCE_ERROR; }
-	"action_server_$subcommand" "$@"
-}
-
-action_image()
-{
-	# Usage/Help ---------------------------
-	local SUBCOMMANDS=("help" "list" "info" "pull" "add" "remove" "update" "find" "get" "installforge")
-	usage()
-	{
-		cat <<- __EOF
-		使用法: $0 image <サブコマンド>
-		使用可能なサブコマンド: ${SUBCOMMANDS[@]}
-		__EOF
-	}
-	help()
-	{
-		cat <<- __EOF
-		image はMinecraftサーバーの実行ファイルイメージを管理します。
-
-		使用可能なサブコマンドは以下のとおりです。
-
-		  help          このヘルプを表示する
-		  list          イメージリポジトリ内のイメージ一覧取得
-		  info          イメージリポジトリ内のイメージ情報取得
-		  pull          Minecraftサーバーイメージをイメージリポジトリに追加
-		  add           イメージリポジトリにイメージ追加
-		  remove        イメージリポジトリ内のイメージ削除
-		  update        イメージリポジトリの更新
-		  find          Miecraftサーバーイメージのバージョン一覧取得
-		  get           Miecraftサーバーイメージの取得
-		  installforge  Minecraftforge MODサーバーのインストール
-		__EOF
-	}
-
-	repository_save() { local result; result="$(jq '.')" && echo "$result" > "$MCSVUTILS_IMAGEREPOSITORY_LOCATION/repository.json"; }
-	repository_new()
-	{
-		local repository='{}'
-		repository="$(echo "$repository" | jq -c --argjson version "$REPO_VERSION" '. |= { $version }')" || return
-		repository="$(echo "$repository" | jq -c '.image |= { }')" || return
-		mkdir -p "$MCSVUTILS_IMAGEREPOSITORY_LOCATION"
-		chmod u=rwx,go=rx "$MCSVUTILS_IMAGEREPOSITORY_LOCATION" || return
-		echo "$repository" | repository_save
-		chmod u=rw,go=r "$MCSVUTILS_IMAGEREPOSITORY_LOCATION/repository.json" || return
-	}
-	repository_is_writable() { touch -c "$MCSVUTILS_IMAGEREPOSITORY_LOCATION/repository.json"; }
-
-	# Subcommands --------------------------
-	action_image_list()
-	{
-		usage()
-		{
-			cat <<- __EOF
-			使用法: $0 image list [オプション] [クエリ]
-			__EOF
-		}
-		help()
-		{
-			cat <<- __EOF
-			image list はローカルリポジトリ内に含まれるMinecraftサーバーイメージ一覧を出力します。
-
-			クエリに正規表現を用いて結果を絞り込むことができます。
-			__EOF
-		}
-		local args=()
-		local helpflag=''
-		local usageflag=''
-		while (( $# > 0 ))
-		do
-			case $1 in
-				--help) 	helpflag='--help'; shift;;
-				--usage)	usageflag='--usage'; shift;;
-				--)	shift; break;;
-				--*)	echo_invalid_flag "$1"; shift;;
-				-*)
-					[[ "$1" =~ h ]] && { helpflag='-h'; }
-					shift
-					;;
-				*)
-					args=("${args[@]}" "$1")
-					shift
-					;;
-			esac
-		done
-		while (( $# > 0 ))
-		do
-			args=("${args[@]}" "$1")
-			shift
-		done
-
-		[ -n "$helpflag" ] && { version; echo; usage; echo; help; return; }
-		[ -n "$usageflag" ] && { usage; return; }
-		check || { oncheckfail; return $RESPONCE_ERROR; }
-
-		repository_is_exist || { echoerr "mcsvutils: 対象となるイメージが存在しません"; return $RESPONCE_NEGATIVE; }
-		local repository
-		repository="$(repository_open)"
-		echo "$repository" | repository_check_integrity || return $RESPONCE_ERROR
-		local query_text
-		if [ ${#args[@]} -ne 0 ]; then
-			query_text="false"
-			for search_query in "${args[@]}"
-			do
-				query_text="$query_text or test( \"$search_query\" )"
-			done
-		else
-			query_text="true"
-		fi
-		local result
-		mapfile -t result < <(echo "$repository" | jq -r ".images[].name | select( $query_text )")
-		if [ ${#result[@]} -ne 0 ]; then
-			for item in "${result[@]}"
-			do
-				echo "$item"
-			done
-			return $RESPONCE_POSITIVE
-		else
-			echoerr "mcsvutils: 対象となるイメージが存在しません"
-			return $RESPONCE_NEGATIVE
-		fi
-	}
-	action_image_info()
-	{
-		usage()
-		{
-			cat <<- __EOF
-			使用法: $0 image info <イメージ>
-			__EOF
-		}
-		help()
-		{
-			cat <<- __EOF
-			image info はローカルリポジトリ内に含まれるMinecraftサーバーイメージの情報を出力します。
-			__EOF
-		}
-		local args=()
-		local helpflag=''
-		local usageflag=''
-		while (( $# > 0 ))
-		do
-			case $1 in
-				--help) 	helpflag='--help'; shift;;
-				--usage)	usageflag='--usage'; shift;;
-				--)	shift; break;;
-				--*)	echo_invalid_flag "$1"; shift;;
-				-*)
-					[[ "$1" =~ h ]] && { helpflag='-h'; }
-					shift
-					;;
-				*)
-					args=("${args[@]}" "$1")
-					shift
-					;;
-			esac
-		done
-		while (( $# > 0 ))
-		do
-			args=("${args[@]}" "$1")
-			shift
-		done
-
-		[ -n "$helpflag" ] && { version; echo; usage; echo; help; return; }
-		[ -n "$usageflag" ] && { usage; return; }
-		check || { oncheckfail; return $RESPONCE_ERROR; }
-
-		[ ${#args[@]} -lt 1 ] && { echoerr "mcsvutils: [E] イメージを指定してください"; return $RESPONCE_ERROR; }
-		[ ${#args[@]} -gt 1 ] && { echoerr "mcsvutils: [E] 引数が多すぎます"; return $RESPONCE_ERROR; }
-
-		repository_is_exist || { echoerr "mcsvutils: 対象となるイメージが存在しません"; return $RESPONCE_NEGATIVE; }
-		local repository
-		repository="$(repository_open)"
-		echo "$repository" | repository_check_integrity || return $RESPONCE_ERROR
-
-		local found=1
-
-		echo "$repository" | repository_is_exist_image "${args[0]}" && {
-			found=0
-			echoerr "mcsvutils: 一致するID"
-			echo "ID: ${args[0]}"
-			local image
-			image="$(echo "$repository" | repository_get_image "${args[0]}")"
-			echo "  名前: $(echo "$image" | repository_image_get_name)"
-			echo "  jarファイルのパス: $(echo "$image" | repository_image_get_path)"
-		}
-
-		local result_image
-		result_image="$(echo "$repository" | repository_find_image_keys_fromname "${args[0]}")"
-		local result_image_count
-		result_image_count="$(echo "$result_image" | jq -r 'length')"
-		[ "$result_image_count" -gt 0 ] && {
-			found=0
-			echoerr "mcsvutils: 一致する名前 (${result_image_count}件の項目)"
-			for item in $(echo "$result_image" | jq -r '.[]')
-			do
-				echo "ID: $item"
-				local image
-				image="$(echo "$repository" | repository_get_image "$item")"
-				echo "  名前: $(echo "$image" | repository_image_get_name)"
-				echo "  jarファイルのパス: $(echo "$image" | repository_image_get_path)"
-			done
-		}
-
-		if [ $found ]; then
-			return $RESPONCE_POSITIVE
-		else
-			echoerr "mcsvutils: 対象となるイメージが存在しません"
-			return $RESPONCE_NEGATIVE
-		fi
-	}
-	action_image_pull()
-	{
-		usage()
-		{
-			cat <<- __EOF
-			使用法:
-			$0 image pull [オプション] <バージョン>
-			$0 image pull [オプション] --latest
-			__EOF
-		}
-		help()
-		{
-			cat <<- __EOF
-			image pull はMinecraftサーバーイメージをダウンロードし、リポジトリに追加します。
-
-			  --name | -n
-			    リポジトリに登録する際の名前を指定します。
-			  --latest
-			    最新のリリースビルドをカタログから検出し、選択します。
-			    このオプションが指定されている場合、バージョンの指定は無効です。
-			__EOF
-		}
-		local args=()
-		local nameflag=''
-		local latestflag=''
-		local helpflag=''
-		local usageflag=''
-		while (( $# > 0 ))
-		do
-			case $1 in
-				--name) 	shift; nameflag="$1"; shift;;
-				--latest)	latestflag='--latest'; shift;;
-				--help) 	helpflag='--help'; shift;;
-				--usage)	usageflag='--usage'; shift;;
-				--)	shift; break;;
-				--*)	echo_invalid_flag "$1"; shift;;
-				-*)
-					local end_of_analyze=1
-					[[ "$1" =~ h ]] && { helpflag='-h'; }
-					[ "$end_of_analyze" -ne 0 ] && [[ "$1" =~ n ]] && { if [[ "$1" =~ n$ ]]; then shift; nameflag="$1"; end_of_analyze=0; else nameflag=''; fi; }
-					shift
-					;;
-				*)
-					args=("${args[@]}" "$1")
-					shift
-					;;
-			esac
-		done
-		while (( $# > 0 ))
-		do
-			args=("${args[@]}" "$1")
-			shift
-		done
-
-		[ -n "$helpflag" ] && { version; echo; usage; echo; help; return; }
-		[ -n "$usageflag" ] && { usage; return; }
-		check || { oncheckfail; return $RESPONCE_ERROR; }
-
-		fetch_mcversions || return
-
-		local selected_version
-		if [ -n "$latestflag" ]; then
-			[ ${#args[@]} -ge 1 ] && { echoerr "mcsvutils: [W] --latestフラグが付いているため、バージョンの指定は無効です"; }
-			local latest
-			latest="$(echo "$VERSION_MANIFEST" | jq -r '.latest.release')"
-			echo "mcsvutils: 最新のバージョン $latest が選択されました"
-			selected_version="$(echo "$VERSION_MANIFEST" | jq -c ".versions[] | select( .id == \"$latest\" )")"
-		else
-			[ ${#args[@]} -lt 1 ] && { echoerr "mcsvutils: [E] ダウンロードするMinecraftのバージョンを指定する必要があります"; return $RESPONCE_ERROR; }
-			selected_version="$(echo "$VERSION_MANIFEST" | jq -c ".versions[] | select( .id == \"${args[0]}\" )")"
-		fi
-		[ -z "$selected_version" ] && { echoerr "mcsvutils: 指定されたバージョンは見つかりませんでした"; return $RESPONCE_ERROR; }
-		echo "mcsvutils: $(echo "$selected_version" | jq -r '.id') のカタログをダウンロードしています..."
-		selected_version=$(curl "$(echo "$selected_version" | jq -r '.url')") || { echoerr "mcsvutils: [E] カタログのダウンロードに失敗しました"; return $RESPONCE_ERROR; }
-		local dl_data
-		local dl_sha1
-		dl_data=$(echo "$selected_version" | jq -r '.downloads.server.url')
-		dl_sha1=$(echo "$selected_version" | jq -r '.downloads.server.sha1')
-		local destination
-		destination="$(basename "$dl_data")"
-
-		local work_dir
-		work_dir="$TEMP/mcsvutils-$(cat /proc/sys/kernel/random/uuid)"
-		(
-			mkdir -p "$work_dir" || { echoerr "mcsvutils: [E] 作業用ディレクトリを作成できませんでした"; return $RESPONCE_ERROR; }
-			cd "$work_dir" || { echoerr "mcsvutils: [E] 作業用ディレクトリに入れませんでした"; return $RESPONCE_ERROR; }
-			echo "mcsvutils: データをダウンロードしています..."
-			wget "$dl_data" -O "$destination" || { echoerr "mcsvutils: [E] データのダウンロードに失敗しました"; return $RESPONCE_ERROR; }
-			if [ "$(sha1sum "$destination" | awk '{print $1}')" = "$dl_sha1" ]; then
-				echo "mcsvutils: データのダウンロードが完了しました"
-				return $RESPONCE_POSITIVE
-			else
-				echoerr "mcsvutils: [W] データのダウンロードが完了しましたが、チェックサムが一致しませんでした"
-				return $RESPONCE_ERROR
-			fi
-		) || return
-
-		local repository
-		repository_is_exist || repository_new || { echoerr "mcsvutils: [E] リポジトリの作成に失敗しました"; return $RESPONCE_ERROR; }
-		repository_is_writable || return $RESPONCE_ERROR
-		repository="$(repository_open)"
-		echo "$repository" | repository_check_integrity || { echoerr "mcsvutils: [E] リポジトリを正しく読み込めませんでした"; return $RESPONCE_ERROR; }
-
-		local id
-		while :
-		do
-			id="$(cat /proc/sys/kernel/random/uuid)"
-			echo "$repository" | repository_is_exist_image "$id" || break
-		done
-
-		(
-			cd "$work_dir" || { echoerr "mcsvutils: [E] 作業用ディレクトリに入れませんでした"; return $RESPONCE_ERROR; }
-			mkdir -p "$MCSVUTILS_IMAGEREPOSITORY_LOCATION/$id"
-			chmod u=rwx,go=rx "$MCSVUTILS_IMAGEREPOSITORY_LOCATION/$id" || return
-			cp "$destination" "$MCSVUTILS_IMAGEREPOSITORY_LOCATION/$id/" || { echoerr "mcsvutils: [E] ファイルのコピーに失敗しました。"; rm -rf "${MCSVUTILS_IMAGEREPOSITORY_LOCATION:?}/${id:?}"; return $RESPONCE_ERROR; }
-			chmod u=rw,go=r "$MCSVUTILS_IMAGEREPOSITORY_LOCATION/$id/$(basename "$destination")" || return
-		) || return
-		rm -rf "${work_dir:?}"
-
-		local jar_path
-		jar_path="$MCSVUTILS_IMAGEREPOSITORY_LOCATION/$id/$(basename "$destination")"
-		[ -z "$nameflag" ] && nameflag="${args[0]}"
-		repository="$(echo "$repository" | jq --argjson data "{ \"name\": \"$nameflag\", \"path\": \"$jar_path\" }" ".images.\"$id\" |= \$data")" || { [ -e "${MCSVUTILS_IMAGEREPOSITORY_LOCATION:?}/${id:?}" ] && rm -rf "${MCSVUTILS_IMAGEREPOSITORY_LOCATION:?}/${id:?}"; return $RESPONCE_ERROR; }
-		echo "$repository" | repository_save || return $RESPONCE_ERROR
-		echoerr "mcsvutils: 操作は成功しました"
-		echo "ID: $id"
-		echo "名前: $nameflag"
-		echo "jarファイルのパス: $jar_path"
-		return $RESPONCE_POSITIVE
-	}
-	action_image_add()
-	{
-		usage()
-		{
-			cat <<- __EOF
-			使用法: $0 image add [オプション] <Minecraftサーバーイメージjar>
-			__EOF
-		}
-		help()
-		{
-			cat <<- __EOF
-			image add はローカルリポジトリ内にMinecraftサーバーイメージを追加します。
-
-			  --name | -n
-			    イメージの名前を指定します。
-			  --copy
-			    --copy, --link, --nocopyでサーバーイメージの扱いを変更します。
-			    管理ディレクトリにファイルをコピーします。(デフォルト)
-			  --link | l
-			    --copy, --link, --nocopyでサーバーイメージの扱いを変更します。
-			    管理ディレクトリにハードリンクを作成します。
-			  --no-copy
-			    --copy, --link, --nocopyでサーバーイメージの扱いを変更します。
-			    コピーを行わず、指定されたパスを登録します。(非推奨)
-			__EOF
-		}
-		local args=()
-		local nameflag=''
-		local copyflag=''
-		local linkflag=''
-		local nocopyflag=''
-		local helpflag=''
-		local usageflag=''
-		while (( $# > 0 ))
-		do
-			case $1 in
-				--name) 	shift; nameflag="$1"; shift;;
-				--copy) 	copyflag="--copy"; shift;;
-				--link) 	linkflag="--link"; shift;;
-				--no-copy)	nocopyflag="--no-copy"; shift;;
-				--help) 	helpflag='--help'; shift;;
-				--usage)	usageflag='--usage'; shift;;
-				--)	shift; break;;
-				--*)	echo_invalid_flag "$1"; shift;;
-				-*)
-					local end_of_analyze=1
-					[[ "$1" =~ h ]] && { helpflag='-h'; }
-					[[ "$1" =~ l ]] && { linkflag='-l'; }
-					[ "$end_of_analyze" -ne 0 ] && [[ "$1" =~ n ]] && { if [[ "$1" =~ n$ ]]; then shift; nameflag="$1"; end_of_analyze=0; else nameflag=''; fi; }
-					shift
-					;;
-				*)
-					args=("${args[@]}" "$1")
-					shift
-					;;
-			esac
-		done
-		while (( $# > 0 ))
-		do
-			args=("${args[@]}" "$1")
-			shift
-		done
-
-		[ -n "$helpflag" ] && { version; echo; usage; echo; help; return; }
-		[ -n "$usageflag" ] && { usage; return; }
-		check || { oncheckfail; return $RESPONCE_ERROR; }
-
-		[ ${#args[@]} -lt 1 ] && { echoerr "mcsvutils: [E] ファイルを指定してください"; return $RESPONCE_ERROR; }
-		[ ${#args[@]} -gt 1 ] && { echoerr "mcsvutils: [E] 引数が多すぎます"; return $RESPONCE_ERROR; }
-		{ [ -n "$copyflag" ] && [ -n "$linkflag" ]; } && { echoerr "mcsvutils: [E] --copy と --link は同時に指定できません"; return $RESPONCE_ERROR; }
-		{ [ -n "$linkflag" ] && [ -n "$nocopyflag" ]; } && { echoerr "mcsvutils: [E] --link と --no-copy は同時に指定できません"; return $RESPONCE_ERROR; }
-		{ [ -n "$nocopyflag" ] && [ -n "$copyflag" ]; } && { echoerr "mcsvutils: [E] --copy と --no-copy は同時に指定できません"; return $RESPONCE_ERROR; }
-
-		[ -e "${args[0]}" ] || { echoerr "mcsvutils: [E] ${args[0]} が見つかりません"; return $RESPONCE_ERROR; }
-		[ -f "${args[0]}" ] || { echoerr "mcsvutils: [E] ${args[0]} はファイルではありません"; return $RESPONCE_ERROR; }
-
-		local repository
-		repository_is_exist || repository_new || { echoerr "mcsvutils: [E] リポジトリの作成に失敗しました"; return $RESPONCE_ERROR; }
-		repository_is_writable || return $RESPONCE_ERROR
-		repository="$(repository_open)"
-		echo "$repository" | repository_check_integrity || { echoerr "mcsvutils: [E] リポジトリを正しく読み込めませんでした"; return $RESPONCE_ERROR; }
-
-		local id
-		while :
-		do
-			id="$(cat /proc/sys/kernel/random/uuid)"
-			echo "$repository" | repository_is_exist_image "$id" || break
-		done
-
-		local jar_path
-		if [ -n "$linkflag" ]; then
-			mkdir -p "$MCSVUTILS_IMAGEREPOSITORY_LOCATION/$id"
-			chmod u=rwx,go=rx "$MCSVUTILS_IMAGEREPOSITORY_LOCATION/$id" || return
-			ln "${args[0]}" "$MCSVUTILS_IMAGEREPOSITORY_LOCATION/$id/" || { echoerr "mcsvutils: [E] ファイルのリンク作成に失敗しました。"; rm -rf "${MCSVUTILS_IMAGEREPOSITORY_LOCATION:?}/${id:?}"; return $RESPONCE_ERROR; }
-			jar_path="$MCSVUTILS_IMAGEREPOSITORY_LOCATION/$id/$(basename "${args[0]}")"
-		elif [ -n "$nocopyflag" ]; then
-			jar_path="$(cd "$(dirname "${args[0]}")" || return $RESPONCE_ERROR; pwd)/${args[0]}" || { echoerr "mcsvutils: [E] ファイルの取得に失敗しました。"; return $RESPONCE_ERROR; }
-		else
-			mkdir -p "$MCSVUTILS_IMAGEREPOSITORY_LOCATION/$id"
-			chmod u=rwx,go=rx "$MCSVUTILS_IMAGEREPOSITORY_LOCATION/$id" || return
-			cp "${args[0]}" "$MCSVUTILS_IMAGEREPOSITORY_LOCATION/$id/" || { echoerr "mcsvutils: [E] ファイルのコピーに失敗しました。"; rm -rf "${MCSVUTILS_IMAGEREPOSITORY_LOCATION:?}/${id:?}"; return $RESPONCE_ERROR; }
-			chmod u=rw,go=r "$MCSVUTILS_IMAGEREPOSITORY_LOCATION/$id/$(basename "${args[0]}")" || return
-			jar_path="$MCSVUTILS_IMAGEREPOSITORY_LOCATION/$id/$(basename "${args[0]}")"
-		fi
-
-		repository="$(echo "$repository" | jq --argjson data "{ \"name\": \"$nameflag\", \"path\": \"$jar_path\" }" ".images.\"$id\" |= \$data")" || { [ -e "${MCSVUTILS_IMAGEREPOSITORY_LOCATION:?}/${id:?}" ] && rm -rf "${MCSVUTILS_IMAGEREPOSITORY_LOCATION:?}/${id:?}"; return $RESPONCE_ERROR; }
-		echo "$repository" | repository_save || return $RESPONCE_ERROR
-		echoerr "mcsvutils: 操作は成功しました"
-		echo "ID: $id"
-		echo "名前: $nameflag"
-		echo "jarファイルのパス: $jar_path"
-		return $RESPONCE_POSITIVE
-	}
-	action_image_remove()
-	{
-		usage()
-		{
-			cat <<- __EOF
-			使用法: $0 image remove [オプション] <クエリ>
-			__EOF
-		}
-		help()
-		{
-			cat <<- __EOF
-			image remove はローカルリポジトリ内からMinecraftサーバーイメージを削除します。
-			削除する対象をクエリで指定します。
-
-			  --id | -i
-			    クエリがID指定であることをマークします。
-			  --name | -n
-			    クエリが名前指定であることをマークします。
-			  --quiet | -q
-			    削除される項目が複数ある場合でも、確認を行わず削除します。
-			  --no-delete
-			    管理ディレクトリからのデータの削除を行わず、リポジトリ上の項目の更新のみを行います。(非推奨)
-			__EOF
-		}
-		local args=()
-		local idflag=''
-		local nameflag=''
-		local quietflag=''
-		local nocopyflag=''
-		local helpflag=''
-		local usageflag=''
-		while (( $# > 0 ))
-		do
-			case $1 in
-				--id)       	idflag="--id"; shift;;
-				--name)     	nameflag="--name"; shift;;
-				--quiet)    	quietflag="--quiet"; shift;;
-				--no-delete)	nodeleteflag="--no-delete"; shift;;
-				--help)     	helpflag='--help'; shift;;
-				--usage)    	usageflag='--usage'; shift;;
-				--)	shift; break;;
-				--*)	echo_invalid_flag "$1"; shift;;
-				-*)
-					[[ "$1" =~ i ]] && { idflag='-i'; }
-					[[ "$1" =~ n ]] && { nameflag='-n'; }
-					[[ "$1" =~ q ]] && { quietflag='-q'; }
-					[[ "$1" =~ h ]] && { helpflag='-h'; }
-					shift
-					;;
-				*)
-					args=("${args[@]}" "$1")
-					shift
-					;;
-			esac
-		done
-		while (( $# > 0 ))
-		do
-			args=("${args[@]}" "$1")
-			shift
-		done
-
-		[ -n "$helpflag" ] && { version; echo; usage; echo; help; return; }
-		[ -n "$usageflag" ] && { usage; return; }
-		check || { oncheckfail; return $RESPONCE_ERROR; }
-
-		[ ${#args[@]} -lt 1 ] && { echoerr "mcsvutils: [E] イメージを指定してください"; return $RESPONCE_ERROR; }
-		[ ${#args[@]} -gt 1 ] && { echoerr "mcsvutils: [E] 引数が多すぎます"; return $RESPONCE_ERROR; }
-
-		repository_is_exist || { echoerr "mcsvutils: 対象となるイメージが存在しません"; return $RESPONCE_NEGATIVE; }
-		repository_is_writable || return $RESPONCE_ERROR
-		local repository
-		repository="$(repository_open)"
-		echo "$repository" | repository_check_integrity || return $RESPONCE_ERROR
-
-		local target="[]"
-		local found_id=1
-		{ [ -n "$idflag" ] || { [ -z "$idflag" ] && [ -z "$nameflag" ]; } } && {
-			echo "$repository" | repository_is_exist_image "${args[0]}" && {
-				found_id=0
-				target="[\"${args[0]}\"]"
-			}
-		}
-		local found_name=1
-		{ [ -n "$nameflag" ] || { [ -z "$idflag" ] && [ -z "$nameflag" ]; } } && {
-			local images_fromname
-			images_fromname="$(echo "$repository" | repository_find_image_keys_fromname "${args[0]}")"
-			[ "$(echo "$images_fromname" | jq -r 'length')" -gt 0 ] && {
-				found_name=0
-				target="$(echo "$target" | jq -c --argjson found_image "$images_fromname" '. + $found_image | unique')"
-			}
-		}
-
-		[ $found_id -eq 0 ] && [ $found_name -eq 0 ] && echoerr "mcsvutils: [W] IDと名前の両方に一致する項目があります。どちらか一方の項目を選択するには --id または --name オプションを付けてください。"
-		[ $found_id -eq 0 ] || [ $found_name -eq 0 ] || { echoerr "mcsvutils: 対象となるイメージが存在しません"; return $RESPONCE_NEGATIVE; }
-		[ -z "$quietflag" ] && [ "$(echo "$target" | jq -r 'length')" -gt 1 ]
-		local ask_delete=$?
-		for item in $(echo "$target" | jq -r '.[]')
-		do
-			local image
-			image="$(echo "$repository" | repository_get_image "$item")"
-			[ $ask_delete -eq 0 ] && {
-				local ans
-				echo -n "$item: $(echo "$image" | repository_image_get_name) ($(echo "$image" | repository_image_get_path)) を削除しますか[y/N]: "
-				read -r ans
-				[ "$ans" != "y" ] && continue
-			}
-			[ -z "$nodeleteflag" ] && {
-				[ -e "${MCSVUTILS_IMAGEREPOSITORY_LOCATION:?}/${item:?}" ] && { rm -rf "${MCSVUTILS_IMAGEREPOSITORY_LOCATION:?}/${item:?}" || { echoerr "$item のデータを削除できませんでした"; continue; } }
-			}
-			repository="$(echo "$repository" | jq -c "del(.images.\"$item\")")" || { echoerr "mcsvutils: [E] リポジトリの更新に失敗しました"; return $RESPONCE_ERROR; }
-		done
-		echo "$repository" | repository_save || { echoerr "mcsvutils: [E] リポジトリの保存に失敗しました"; return $RESPONCE_ERROR; }
-		return $RESPONCE_POSITIVE
-	}
-	action_image_update()
-	{
-		usage()
-		{
-			cat <<- __EOF
-			使用法: $0 image update [オプション]
-			__EOF
-		}
-		help()
-		{
-			cat <<- __EOF
-			image update はローカルリポジトリのデータを更新します。
-
-			  --no-delete
-			    管理ディレクトリからのデータの削除を行わず、リポジトリ上の項目の更新のみを行います。(非推奨)
-			__EOF
-		}
-		local args=()
-		local nocopyflag=''
-		local helpflag=''
-		local usageflag=''
-		while (( $# > 0 ))
-		do
-			case $1 in
-				--no-delete)	nodeleteflag="--no-delete"; shift;;
-				--help)     	helpflag='--help'; shift;;
-				--usage)    	usageflag='--usage'; shift;;
-				--)	shift; break;;
-				--*)	echo_invalid_flag "$1"; shift;;
-				-*)
-					[[ "$1" =~ h ]] && { helpflag='-h'; }
-					shift
-					;;
-				*)
-					args=("${args[@]}" "$1")
-					shift
-					;;
-			esac
-		done
-		while (( $# > 0 ))
-		do
-			args=("${args[@]}" "$1")
-			shift
-		done
-
-		[ -n "$helpflag" ] && { version; echo; usage; echo; help; return; }
-		[ -n "$usageflag" ] && { usage; return; }
-		check || { oncheckfail; return $RESPONCE_ERROR; }
-
-		local repository
-		repository_is_exist || repository_new || { echoerr "mcsvutils: [E] リポジトリの作成に失敗しました"; return $RESPONCE_ERROR; }
-		repository_is_writable || return $RESPONCE_ERROR
-		repository="$(repository_open)" || { echoerr "mcsvutils: [E] イメージリポジトリのデータは有効なJSONではありません"; return $RESPONCE_ERROR; }
-		local version
-		version="$(echo "$repository" | repository_get_version)" || { echoerr "mcsvutils: [E] イメージリポジトリのバージョンを読み取れませんでした"; return $RESPONCE_ERROR; }
-		case "$version" in
-			"$REPO_VERSION") :;;
-			*) echoerr "mcsvutils: [E] サポートされないイメージリポジトリのバージョン($version)です"; return $RESPONCE_ERROR;;
-		esac
-
-		echoerr "mcsvutils: 存在しないイメージを指定しているエントリを削除しています"
-		local image_list
-		mapfile -t image_list < <(echo "$repository" | jq -r '.images | keys | .[]')
-		for item in "${image_list[@]}"
-		do
-			local path
-			path="$(echo "$repository" | repository_get_image "$item" | repository_image_get_path)"
-			[ -e "$path" ] || {
-				local name
-				name="$(echo "$repository" | repository_get_image "$item" | repository_image_get_name)"
-				repository="$(echo "$repository" | jq -c "del(.images.\"$item\")")"
-				echo "$item: $name ($path) をリポジトリから削除しました"
-			}
-		done
-		echo "$repository" | repository_save
-
-		[ -z "$nodeleteflag" ] &&
-		{
-			echoerr "mcsvutils: 管理ディレクトリ内の参照されないファイルを削除しています"
-			for item in "${MCSVUTILS_IMAGEREPOSITORY_LOCATION:?}"/*/
-			do
-				[ -e "$item" ] || break
-				local id=${item#"${MCSVUTILS_IMAGEREPOSITORY_LOCATION:?}/"}
-				id=${id%/}
-				echo "$repository" | repository_is_exist_image "$id" || {
-					rm -rf "${item:?}"
-					echo "$item を削除しました"
-				}
-			done
-		}
-	}
-	action_image_find()
-	{
-		usage()
-		{
-			cat <<- __EOF
-			使用法: $0 image find [オプション] [クエリ]
-			__EOF
-		}
-		help()
-		{
-			cat <<- __EOF
-			image find はMinecraftサーバーのバージョン一覧を出力します。
-
-			--latest
-			    最新のバージョンを表示する
-			--no-release
-			    releaseタグの付いたバージョンを除外する
-			--snapshot
-			    snapshotタグの付いたバージョンをリストに含める
-			--old-alpha
-			    old_alphaタグの付いたバージョンをリストに含める
-			--old-beta
-			    old_betaタグの付いたバージョンをリストに含める
-
-			クエリに正規表現を用いて結果を絞り込むことができます。
-			__EOF
-		}
-		local args=()
-		local latestflag=''
-		local no_releaseflag=''
-		local snapshotflag=''
-		local old_alphaflag=''
-		local old_betaflag=''
-		local helpflag=''
-		local usageflag=''
-		while (( $# > 0 ))
-		do
-			case $1 in
-				--latest)   	latestflag="--latest"; shift;;
-				--no-release)	no_releaseflag="--no-release"; shift;;
-				--snapshot) 	snapshotflag="--snapshot"; shift;;
-				--old-alpha) 	old_alphaflag="--old-alpha"; shift;;
-				--old-beta) 	old_betaflag="--old-beta"; shift;;
-				--help)     	helpflag='--help'; shift;;
-				--usage)    	usageflag='--usage'; shift;;
-				--)	shift; break;;
-				--*)	echo_invalid_flag "$1"; shift;;
-				-*)
-					[[ "$1" =~ h ]] && { helpflag='-h'; }
-					shift
-					;;
-				*)
-					args=("${args[@]}" "$1")
-					shift
-					;;
-			esac
-		done
-		while (( $# > 0 ))
-		do
-			args=("${args[@]}" "$1")
-			shift
-		done
-
-		[ -n "$helpflag" ] && { version; echo; usage; echo; help; return; }
-		[ -n "$usageflag" ] && { usage; return; }
-		check || { oncheckfail; return $RESPONCE_ERROR; }
-
-		fetch_mcversions || return $?
-		if [ -n "$latestflag" ]; then
-			if [ -z "$snapshotflag" ]; then
-				echo "$VERSION_MANIFEST" | jq -r '.latest.release'
-			else
-				echo "$VERSION_MANIFEST" | jq -r '.latest.snapshot'
-			fi
-		else
-			local select_types="false"
-			[ -z "$no_releaseflag" ] && select_types="$select_types or .type == \"release\""
-			[ -n "$snapshotflag" ] && select_types="$select_types or .type == \"snapshot\""
-			[ -n "$old_betaflag" ] && select_types="$select_types or .type == \"old_beta\""
-			[ -n "$old_alphaflag" ] &&  select_types="$select_types or .type == \"old_alpha\""
-			local select_ids
-			if [ ${#args[@]} -ne 0 ]; then
-				select_ids="false"
-				for search_query in "${args[@]}"
-				do
-					select_ids="$select_ids or test( \"$search_query\" )"
-				done
-			else
-				select_ids="true"
-			fi
-			local result
-			mapfile -t result < <(echo "$VERSION_MANIFEST" | jq -r ".versions[] | select( $select_types ) | .id | select( $select_ids )")
-			if [ ${#result[@]} -ne 0 ]; then
-				for item in "${result[@]}"
-				do
-					echo "$item"
-				done
-				return $RESPONCE_POSITIVE
-			else
-				echoerr "mcsvutils: 対象となるバージョンが存在しません"
-				return $RESPONCE_NEGATIVE
-			fi
-		fi
-	}
-	action_image_get()
-	{
-		usage()
-		{
-			cat <<- __EOF
-			使用法:
-			$0 image get [-o [保存先]] <バージョン>
-			$0 image get [-o [保存先]] --latest
-			__EOF
-		}
-		help()
-		{
-			cat <<- __EOF
-			image get はMinecraftサーバーのjarをダウンロードします。
-			<バージョン>に指定可能なものは $0 image find で確認可能です。
-
-			--out | -o
-				出力先ファイル名を指定します。
-				指定がなかった場合は規定の名前で書き出されます。
-			--latest
-				最新のリリースビルドをカタログから検出し、選択します。
-				このオプションが指定されている場合、バージョンの指定は無効です。
-			__EOF
-		}
-		local args=()
-		local outflag=''
-		local latestflag=''
-		local helpflag=''
-		local usageflag=''
-		while (( $# > 0 ))
-		do
-			case $1 in
-				--out)  	shift; outflag="$1"; shift;;
-				--latest)	latestflag="--latest"; shift;;
-				--help) 	helpflag='--help'; shift;;
-				--usage)	usageflag='--usage'; shift;;
-				--)	shift; break;;
-				--*)	echo_invalid_flag "$1"; shift;;
-				-*)
-					[[ "$1" =~ h ]] && { helpflag='-h'; }
-					[[ "$1" =~ o ]] && { if [[ "$1" =~ o$ ]]; then shift; outflag="$1"; else outflag=''; fi; }
-					shift
-					;;
-				*)
-					args=("${args[@]}" "$1")
-					shift
-					;;
-			esac
-		done
-		while (( $# > 0 ))
-		do
-			args=("${args[@]}" "$1")
-			shift
-		done
-
-		[ -n "$helpflag" ] && { version; echo; usage; echo; help; return; }
-		[ -n "$usageflag" ] && { usage; return; }
-		check || { oncheckfail; return $RESPONCE_ERROR; }
-
-		fetch_mcversions || return
-
-		local selected_version
-		if [ -n "$latestflag" ]; then
-			[ ${#args[@]} -ge 1 ] && { echoerr "mcsvutils: [W] --latestフラグが付いているため、バージョンの指定は無効です"; }
-			local latest
-			latest="$(echo "$VERSION_MANIFEST" | jq -r '.latest.release')"
-			echo "mcsvutils: 最新のバージョン $latest が選択されました"
-			selected_version="$(echo "$VERSION_MANIFEST" | jq -c ".versions[] | select( .id == \"$latest\" )")"
-		else
-			[ ${#args[@]} -lt 1 ] && { echoerr "mcsvutils: [E] ダウンロードするMinecraftのバージョンを指定する必要があります"; return $RESPONCE_ERROR; }
-			selected_version="$(echo "$VERSION_MANIFEST" | jq -c ".versions[] | select( .id == \"${args[0]}\" )")"
-		fi
-		[ -z "$selected_version" ] && { echoerr "mcsvutils: 指定されたバージョンは見つかりませんでした"; return $RESPONCE_ERROR; }
-		echo "mcsvutils: $(echo "$selected_version" | jq -r '.id') のカタログをダウンロードしています..."
-		selected_version=$(curl "$(echo "$selected_version" | jq -r '.url')") || { echoerr "mcsvutils: [E] カタログのダウンロードに失敗しました"; return $RESPONCE_ERROR; }
-		local dl_data
-		local dl_sha1
-		dl_data=$(echo "$selected_version" | jq -r '.downloads.server.url')
-		dl_sha1=$(echo "$selected_version" | jq -r '.downloads.server.sha1')
-		local destination
-		if [ -n "$outflag" ]
-			then destination="$outflag"
-			else destination="$(basename "$dl_data")"
-		fi
-		echo "mcsvutils: データをダウンロードしています..."
-		wget "$dl_data" -O "$destination" || { echoerr "mcsvutils: [E] データのダウンロードに失敗しました"; return $RESPONCE_ERROR; }
-		if [ "$(sha1sum "$destination" | awk '{print $1}')" = "$dl_sha1" ]; then
-			echo "mcsvutils: データのダウンロードが完了しました"
-			return $RESPONCE_POSITIVE
-		else
-			echoerr "mcsvutils: [W] データのダウンロードが完了しましたが、チェックサムが一致しませんでした"
-			return $RESPONCE_ERROR
-		fi
-	}
-	action_image_installforge()
-	{
-		usage()
-		{
-			cat <<- __EOF
-			使用法: $0 image installforge [--java <java実行環境>] <インストーラーjar>
-			__EOF
-		}
-		help()
-		{
-			cat <<- __EOF
-			image installforge はMinecraftforge MODサーバーのインストーラーを起動し、イメージリポジトリ内にインストールします。
-			https://files.minecraftforge.net/ からインストーラーをダウンロードして使用してください。
-
-			--java
-			    java実行環境を指定します。
-			    指定がなかった場合は'java'が使用されます。
-			__EOF
-		}
-		local args=()
-		local javaflag=''
-		local helpflag=''
-		local usageflag=''
-		while (( $# > 0 ))
-		do
-			case $1 in
-				--java) 	shift; javaflag="$1"; shift;;
-				--help) 	helpflag='--help'; shift;;
-				--usage)	usageflag='--usage'; shift;;
-				--)	shift; break;;
-				--*)	echo_invalid_flag "$1"; shift;;
-				-*)
-					[[ "$1" =~ h ]] && { helpflag='-h'; }
-					shift
-					;;
-				*)
-					args=("${args[@]}" "$1")
-					shift
-					;;
-			esac
-		done
-		while (( $# > 0 ))
-		do
-			args=("${args[@]}" "$1")
-			shift
-		done
-
-		[ -n "$helpflag" ] && { version; echo; usage; echo; help; return; }
-		[ -n "$usageflag" ] && { usage; return; }
-		check || { oncheckfail; return $RESPONCE_ERROR; }
-
-		local invocations=()
-		if [ -n "$javaflag" ]
-			then invocations=("$javaflag")
-			else invocations=("java")
-		fi
-		[ ${#args[@]} -lt 1 ] && {
-			echoerr "mcsvutils: [E] インストールするMinecraftforgeのjarを指定してください"
-			return $RESPONCE_ERROR
-		}
-		invocations=("${invocations[@]}" "-jar" "${args[0]}")
-
-		local repository
-		repository_is_exist || repository_new || { echoerr "mcsvutils: [E] リポジトリの作成に失敗しました"; return $RESPONCE_ERROR; }
-		repository_is_writable || return $RESPONCE_ERROR
-		repository="$(repository_open)"
-		echo "$repository" | repository_check_integrity || { echoerr "mcsvutils: [E] リポジトリを正しく読み込めませんでした"; return $RESPONCE_ERROR; }
-
-		local id
-		while :
-		do
-			id="$(cat /proc/sys/kernel/random/uuid)"
-			echo "$repository" | repository_is_exist_image "$id" || break
-		done
-
-		invocations=("${invocations[@]}" "--installServer" "$MCSVUTILS_IMAGEREPOSITORY_LOCATION/$id/")
-		(
-			mkdir -p "$MCSVUTILS_IMAGEREPOSITORY_LOCATION/$id" || { echoerr "mcsvutils: [E] ディレクトリを作成できませんでした。"; return $RESPONCE_ERROR; }
-			"${invocations[@]}" || return
-			chmod -R u=rwx,go=rx,ugo+X "$MCSVUTILS_IMAGEREPOSITORY_LOCATION/$id" || return
-		) || { echoerr "mcsvutils: [E] Minecraftforgeサーバーのインストールに失敗しました。詳細はログを確認してください。"; return $RESPONCE_ERROR; }
-		local resultjar
-		resultjar="$(basename "$(find "$MCSVUTILS_IMAGEREPOSITORY_LOCATION/$id/" ./ -maxdepth 1 -name "forge*" -type f -print -quit)")" || {
-			echoerr "mcsvutils: [E] Minecraftforgeサーバーの実行用ファイルが見つかりませんでした。"
-			rm -rf "${MCSVUTILS_IMAGEREPOSITORY_LOCATION:?}/${id:?}"
-			return $RESPONCE_ERROR
-		}
-		local resultname
-		resultname="${resultjar//.jar/}"
-		resultjar="$MCSVUTILS_IMAGEREPOSITORY_LOCATION/$id/$resultjar"
-
-		repository="$(echo "$repository" | jq --argjson data "{ \"name\": \"$resultname\", \"path\": \"$resultjar\" }" ".images.\"$id\" |= \$data")" || { [ -e "${MCSVUTILS_IMAGEREPOSITORY_LOCATION:?}/${id:?}" ] && rm -rf "${MCSVUTILS_IMAGEREPOSITORY_LOCATION:?}/${id:?}"; return $RESPONCE_ERROR; }
-		echo "$repository" | repository_save || return $RESPONCE_ERROR
-		echoerr "mcsvutils: 操作は成功しました"
-		echo "ID: $id"
-		echo "名前: $resultname"
-		echo "jarファイルのパス: $resultjar"
-		return $RESPONCE_POSITIVE
-	}
-
-	# Analyze arguments --------------------
-	local subcommand=""
-	if [[ $1 =~ -.* ]] || [ "$1" = "" ]; then
-		subcommand="none"
-		while (( $# > 0 ))
-		do
-			case $1 in
-				--help) 	helpflag='--help'; shift;;
-				--usage)	usageflag='--usage'; shift;;
-				--*)	echo_invalid_flag "$1"; shift;;
-				-*)
-					[[ "$1" =~ h ]] && { helpflag='-h'; }
-					shift
-					;;
-				*)	break;;
-			esac
-		done
-	else
-		for item in "${SUBCOMMANDS[@]}"
-		do
-			[ "$item" == "$1" ] && {
-				subcommand="$item"
-				shift
-				break
-			}
-		done
-	fi
-	[ -z "$subcommand" ] && { echoerr "mcsvutils: [E] 無効なサブコマンドを指定しました。"; usage >&2; return $RESPONCE_ERROR; }
-	{ [ "$subcommand" == "help" ] || [ -n "$helpflag" ]; } && { version; echo; usage; echo; help; return; }
-	[ -n "$usageflag" ] && { usage; return; }
-	[ "$subcommand" == "none" ] && { echoerr "mcsvutils: [E] サブコマンドが指定されていません。"; echoerr "$0 image help で詳細なヘルプを表示します。"; usage >&2; return $RESPONCE_ERROR; }
-	"action_image_$subcommand" "$@"
-}
-
-action_spigot()
-{
-	# Usage/Help ---------------------------
-	local SUBCOMMANDS=("help" "build")
-	usage()
-	{
-		cat <<- __EOF
-		使用法: $0 spigot <サブコマンド>
-		使用可能なサブコマンド: ${SUBCOMMANDS[@]}
-		__EOF
-	}
-	help()
-	{
-		cat <<- __EOF
-		spigot はCraftBukkit/Spigotサーバーの実行ファイルイメージを管理します。
-
-		使用可能なサブコマンドは以下のとおりです。
-
-		  help   このヘルプを表示する
-		  build  BuildTools.jarを使用したサーバーイメージのビルド
-		__EOF
-	}
-
-	# Subcommands --------------------------
-	action_spigot_build()
-	{
-		usage()
-		{
-			cat <<- __EOF
-			使用法: $0 spigot build [-o [保存先]] <バージョン>
-			__EOF
-		}
-		help()
-		{
-			cat <<- __EOF
-			spigot build はSpigotサーバーのビルドツールをダウンロードし、Minecraftサーバーからビルドします。
-			<バージョン>に指定可能なものは https://www.spigotmc.org/wiki/buildtools/#versions を確認してください。
-
-			--out | -o
-			    出力先を指定します。
-			    指定がなかった場合は規定の名前で書き出されます。
-			__EOF
-		}
-		local args=()
-		local outflag=''
-		local latestflag=''
-		local javaflag=''
-		local helpflag=''
-		local usageflag=''
-		while (( $# > 0 ))
-		do
-			case $1 in
-				--out)  	shift; outflag="$1"; shift;;
-				--latest)	latestflag="--latest"; shift;;
-				--java) 	shift; javaflag="$1"; shift;;
-				--help) 	helpflag='--help'; shift;;
-				--usage)	usageflag='--usage'; shift;;
-				--)	shift; break;;
-				--*)	echo_invalid_flag "$1"; shift;;
-				-*)
-					[[ "$1" =~ h ]] && { helpflag='-h'; }
-					[[ "$1" =~ o ]] && { if [[ "$1" =~ o$ ]]; then shift; outflag="$1"; else outflag=''; fi; }
-					shift
-					;;
-				*)
-					args=("${args[@]}" "$1")
-					shift
-					;;
-			esac
-		done
-		while (( $# > 0 ))
-		do
-			args=("${args[@]}" "$1")
-			shift
-		done
-
-		[ -n "$helpflag" ] && { version; echo; usage; echo; help; return; }
-		[ -n "$usageflag" ] && { usage; return; }
-		check || { oncheckfail; return $RESPONCE_ERROR; }
-
-		local invocations=()
-		if [ -n "$javaflag" ]
-			then invocations=("$javaflag")
-			else invocations=("java")
-		fi
-		invocations=("${invocations[@]}" "-jar" "BuildTools.jar")
-		if [ -z "$latestflag" ]; then
-			[ ${#args[@]} -lt 1 ] && { echoerr "mcsvutils: [E] ビルドするMinecraftのバージョンを指定する必要があります"; return $RESPONCE_ERROR; }
-			invocations=("${invocations[@]}" "--rev" "${args[0]}")
-		fi
-		local work_dir
-		work_dir="$TEMP/mcsvutils-$(cat /proc/sys/kernel/random/uuid)"
-		(
-			mkdir -p "$work_dir" || { echoerr "mcsvutils: [E] 作業用ディレクトリを作成できませんでした"; return $RESPONCE_ERROR; }
-			cd "$work_dir" || { echoerr "mcsvutils: [E] 作業用ディレクトリに入れませんでした"; return $RESPONCE_ERROR; }
-			wget "$SPIGOT_BUILDTOOLS_LOCATION" || { echoerr "mcsvutils: [E] BuildTools.jar のダウンロードに失敗しました"; return $RESPONCE_ERROR; }
-			"${invocations[@]}" || return
-			tail BuildTools.log.txt | grep "Success! Everything completed successfully. Copying final .jar files now." >/dev/null 2>&1 || return
-		) || { echoerr "mcsvutils: [E] Spigotサーバーのビルドに失敗しました。詳細はログを確認してください。"; return $RESPONCE_ERROR; }
-		local resultjar
-		resultjar="$(tail "$work_dir/BuildTools.log.txt" | grep -- "- Saved as .*\\.jar" | sed -e 's/ *- Saved as //g')"
-		local destination="./"
-		[ -n "$outflag" ] && destination="$outflag"
-		if [ -e "${work_dir}/$(basename "$resultjar")" ]; then
-			mv "${work_dir}/$(basename "$resultjar")" "$destination" || { echoerr "[E] jarファイルの移動に失敗しました。"; return $RESPONCE_ERROR; }
-			rm -rf "$work_dir"
-			return $RESPONCE_POSITIVE
-		else
-			echoerr "[W] jarファイルの自動探索に失敗しました。ファイルは移動されません。"
-			return $RESPONCE_NEGATIVE
-		fi
-	}
-
-	# Analyze arguments --------------------
-	local subcommand=""
-	if [[ $1 =~ -.* ]] || [ "$1" = "" ]; then
-		subcommand="none"
-		while (( $# > 0 ))
-		do
-			case $1 in
-				--help) 	helpflag='--help'; shift;;
-				--usage)	usageflag='--usage'; shift;;
-				--*)	echo_invalid_flag "$1"; shift;;
-				-*)
-					[[ "$1" =~ h ]] && { helpflag='-h'; }
-					shift
-					;;
-				*)	break;;
-			esac
-		done
-	else
-		for item in "${SUBCOMMANDS[@]}"
-		do
-			[ "$item" == "$1" ] && {
-				subcommand="$item"
-				shift
-				break
-			}
-		done
-	fi
-	[ -z "$subcommand" ] && { echoerr "mcsvutils: [E] 無効なサブコマンドを指定しました。"; usage >&2; return $RESPONCE_ERROR; }
-	{ [ "$subcommand" == "help" ] || [ -n "$helpflag" ]; } && { version; echo; usage; echo; help; return; }
-	[ -n "$usageflag" ] && { usage; return; }
-	[ "$subcommand" == "none" ] && { echoerr "mcsvutils: [E] サブコマンドが指定されていません。"; echoerr "$0 spigot help で詳細なヘルプを表示します。"; usage >&2; return $RESPONCE_ERROR; }
-	"action_spigot_$subcommand" "$@"
-}
-
-action_check()
-{
-	usage()
-	{
-		cat <<- __EOF
-		使用法: $0 check
-		__EOF
-	}
-	help()
-	{
-		cat <<- __EOF
-		checkはこのスクリプトの動作要件のチェックを行います。
-		チェックに成功した場合 $RESPONCE_POSITIVE 、失敗した場合は $RESPONCE_NEGATIVE を返します。
-		checkに失敗した場合は必要なパッケージが不足していないか確認してください。
-		__EOF
-	}
-	local helpflag=''
-	local usageflag=''
-	local args=()
-	while (( $# > 0 ))
-	do
-		case $1 in
-			--help) 	helpflag='--help'; shift;;
-			--usage)	usageflag='--usage'; shift;;
-			--)	shift; break;;
-			--*)	echo_invalid_flag "$1"; shift;;
+		local flag_help="$flag_help"
+		local flag_usage="$flag_usage"
+		while (( $# > 0 )); do case $1 in
+			--stdin)	flag_stdin='true'; shift;;
+			--file)		flag_file='true'; shift;;
+			--help)		flag_help='true'; shift;;
+			--usage)	flag_usage='true'; shift;;
+			--)			shift;	break;;
+			--*)		echo "mcsvutils: Invalid option $1" >&2;	usage >&2;	return 2;;
 			-*)
-				[[ "$1" =~ h ]] && { helpflag='-h'; }
+				if [[ $1 =~ i ]]; then flag_stdin='true'; fi
+				if [[ $1 =~ f ]]; then flag_file='true'; fi
+				if [[ $1 =~ h ]]; then flag_help='true'; fi
+				shift
+				;;
+			*)			args+=("$1");	shift;;
+		esac done
+		while (( $# > 0 )); do 
+			args+=("$1");	shift;
+		done
+
+		[ -z "$flag_help" ] || { help; return; }
+		[ -z "$flag_usage" ] || { usage; return; }
+		assert_precond || return
+		[ ${#args[@]} -le 1 ] || echo "mcsvutils: Trailing arguments will ignore." >&2
+
+		local profile
+		if [ -n "$flag_file" ] && [ ${#args[@]} -gt 0 ]; then
+			profile=$(load_json_file "${args[0]}") || return
+		elif [ -n "$flag_file" ]; then
+			echo "mcsvutils: --file option was specified but no file was specified." >&2
+			return 2
+		elif [ -n "$flag_stdin" ]; then
+			profile=$(load_json_stdin) || return
+		elif [ ${#args[@]} -gt 0 ]; then
+			profile=$(load_json_file "${args[0]}") || return
+		else
+			profile=$(load_json_stdin) || return
+		fi
+		[ -n "$profile" ] || { echo "mcsvutils: The input file is empty." >&2; return 1; }
+		local profile_err
+		profile_err=$(echo "$profile" | profile_check_integrity) || {
+			echo "mcsvutils: Profile integrity error: $(echo "$profile_err" | integrity_errstr)" >&2
+			return 1;
+		}
+
+		# shellcheck disable=SC2016
+		echo "$profile" | jq -r -f <(cat <<<'[.servicename, "Exec image: \(.imagetag)", if (.jre|type=="string") then "Java env: \(.jre)" else empty end, if (.cwd|type=="string") then "Working directory: \(.cwd)" else empty end, if (.jvm|type=="array" and length>0) then "JVM arguments: \(.jvm|join(" "))" else empty end, if (.arguments|type=="array" and length>0) then "Default args: \(.arguments|join(" "))" else empty end]|join("\n")')
+	} # subcommand_profile_info
+
+	subcommand_profile_create() {
+		## profile/create/Help -------------- ##
+
+		usage() {
+			cat <<- __EOF
+			usage: $0 profile create [<options> ...] <name> <image>
+			name: server instance name
+			image: server image tag
+			__EOF
+		}
+		help() {
+			cat <<- __EOF
+			mcsvutils profile create - Create profile
+
+			usage: $0 profile create [<options> ...] <name> <image>
+			name: server instance name
+			image: server image tag
+
+			options:
+			  --cwd <path>
+			    Working directory when running the server
+			  --jre <path>
+			    Java executable file used to run the server
+			  --jvm <string>
+			    Default jvm arguments when starting the server
+			    You can include multiple options by specifying them multiple times.
+			  --arg <string>
+			    Default arguments when starting the server
+			    You can include multiple options by specifying them multiple times.
+			  --help | -h
+			    Show help
+			  --usage
+			    Show usage
+
+			If the command is successful, it will write the generated profile JSON to standard output.
+			__EOF
+		}
+
+		## profile/info/Analyze args -------- ##
+
+		local opt_cwd=
+		local opt_jre=
+		local opts_jvm=()
+		local opts_arg=()
+		local args=()
+		local flag_help="$flag_help"
+		local flag_usage="$flag_usage"
+		while (( $# > 0 )); do case $1 in
+			--cwd=*)		opt_cwd="${1#--cwd=}";	shift;;
+			--cwd)		shift;	opt_cwd="$1";	shift;;
+			--jre=*)		opt_jre="${1#--jre=}";	shift;;
+			--jre)		shift;	opt_jre="$1";	shift;;
+			--jvm=*)		opts_jvm+=("${1#--jvm=}");	shift;;
+			--jvm)		shift;	opts_jvm+=("$1");	shift;;
+			--arg=*)		opts_arg+=("${1#--arg=}");	shift;;
+			--arg)		shift;	opts_arg+=("$1");	shift;;
+			--help)		flag_help='true'; shift;;
+			--usage)	flag_usage='true'; shift;;
+			--)			shift;	break;;
+			--*)		echo "mcsvutils: Invalid option $1" >&2;	usage >&2;	return 2;;
+			-*)
+				if [[ $1 =~ h ]]; then flag_help='true'; fi
+				shift
+				;;
+			*)			args+=("$1");	shift;;
+		esac done
+		while (( $# > 0 )); do 
+			args+=("$1");	shift;
+		done
+
+		[ -z "$flag_help" ] || { help; return; }
+		[ -z "$flag_usage" ] || { usage; return; }
+		assert_precond || return
+		[ ${#args[@]} -ge 2 ] || { echo "mcsvutils: Too few arguments" >&2; usage >&2; return 2; }
+		[ ${#args[@]} -le 2 ] || echo "mcsvutils: Trailing arguments will ignore." >&2
+		local p_name="${args[0]}"
+		local p_imgtag="${args[1]}"
+		[ -n "$p_name" ] || { echo "mcsvutils: Empty name not allowed" >&2; usage >&2; return 2; }
+		[ -n "$p_imgtag" ] || { echo "mcsvutils: Empty image tag not allowed" >&2; usage >&2; return 2; }
+		# todo: イメージタグが実際に存在することを確認
+		# todo: jreが実際に存在することを確認
+		# todo: 作業ディレクトリが実際に存在することを確認
+		local p_jvm;	p_jvm="$(jq -nc '$ARGS.positional' --args -- "${opts_jvm[@]}")" || return
+		local p_args;	p_args="$(jq -nc '$ARGS.positional' --args -- "${opts_arg[@]}")" || return
+
+		# shellcheck disable=SC2016
+		jq -nc --argjson version "$PROFILE_VERSION" --arg pname "$p_name" --arg pimgtag "$p_imgtag" --arg pcwd "$opt_cwd" --arg pjre "$opt_jre" --slurpfile popts <(echo "$p_jvm") --slurpfile pargs <(echo "$p_args") '{ "@context": { name: "mcsvutils.profile", version: $version }, servicename: $pname, imagetag: $pimgtag, cwd: (if $pcwd|type=="string" and length>0 then $pcwd else null end), jre: (if $pjre|type=="string" and length>0 then $pjre else null end), jvm: $popts.[0], arguments: $pargs.[0] }'
+	} # subcommand_profile_create
+
+	subcommand_profile_update() {
+		## profile/update/Help -------------- ##
+
+		usage() {
+			cat <<- __EOF
+			usage: $0 profile update [<options> ...] [<profile>]
+			profile: path to profile
+			__EOF
+		}
+		help() {
+			cat <<- __EOF
+			mcsvutils profile update - Update profile
+
+			usage: $0 profile update [<options> ...] [<profile>]
+			profile: path to profile
+			  If no file is specified, it will be read from standard input.
+
+			options:
+			  --stdin | -i
+			    Read from standard input regardless of arguments
+			    Exclusive with --file option
+			  --file | -p
+			    Abort as an error instead of reading from standard input when no file is specified
+			    Exclusive with --stdin option
+			  --rename <new_name>
+			    Rename service name
+			  --image <imagetag>
+			    Override execute server image
+			  --cwd <path>
+			    Override working directory
+			  --jre <path>
+			    Override Java runtime
+			  --jvm <string>
+			    Override jvm arguments
+			    You can include multiple options by specifying them multiple times.
+			    If this option is specified, it clears the contents of any existing options in profile.
+			    If no options are specified, the options of the input profile will be inherited.
+			    If you simply want to delete options, use the --clear-jvmopts flag.
+			    This flag is exclusive from the --clear-jvmopts flag.
+			  --clear-jvmopts
+			    Do not inherit any options contained in the profile and leave it empty.
+			    This flag is exclusive from the --option flag.
+			  --arg <string>
+			    Default arguments when starting the server
+			    You can include multiple options by specifying them multiple times.
+			    If this option is specified, it clears the contents of any existing options in profile.
+			    If no options are specified, the options of the input profile will be inherited.
+			    If you simply want to delete options, use the --clear-args flag.
+			    This flag is exclusive from the --clear-args flag.
+			  --clear-args
+			    Do not inherit any arguments contained in the profile and leave it empty.
+			    This flag is exclusive from the --arg flag.
+			  --allow-destructive-upgrade
+			    Allow backwards-incompatible upgrades
+			  --help | -h
+			    Show help
+			  --usage
+			    Show usage
+			
+			If the command is successful, it will write the generated profile JSON to standard output.
+			__EOF
+		}
+
+		## profile/info/Analyze args -------- ##
+
+		local flag_stdin=
+		local flag_file=
+		local opt_rename=
+		local opt_image=
+		local opt_cwd=
+		local opt_jre=
+		local opts_jvm=()
+		local flag_clear_jvmopts=
+		local opts_arg=()
+		local flag_clear_args=
+		local flag_allow_destructive_upgrade=
+		local args=()
+		local flag_help="$flag_help"
+		local flag_usage="$flag_usage"
+		while (( $# > 0 )); do case $1 in
+			--stdin)	flag_stdin='true'; shift;;
+			--file)		flag_file='true'; shift;;
+			--rename=*)	opt_rename="${1#--rename=}";	shift;;
+			--rename)	shift;	opt_rename="$1";	shift;;
+			--image=*)	opt_image="${1#--image=}";	shift;;
+			--image)	shift;	opt_image="$1";	shift;;
+			--cwd=*)	opt_cwd="${1#--cwd=}";	shift;;
+			--cwd)		shift;	opt_cwd="$1";	shift;;
+			--jre=*)	opt_jre="${1#--jre=}";	shift;;
+			--jre)		shift;	opt_jre="$1";	shift;;
+			--jvm=*)	opts_jvm+=("${1#--jvm=}");	shift;;
+			--jvm)		shift;	opts_jvm+=("$1");	shift;;
+			--clear-jvmopts)
+				flag_clear_jvmopts='true';	shift;;
+			--arg=*)	opts_arg+=("${1#--arg=}");	shift;;
+			--arg)		shift;	opts_arg+=("$1");	shift;;
+			--clear-args)
+				flag_clear_args='true';	shift;;
+			--allow-destructive-upgrade)
+				flag_allow_destructive_upgrade='true';	shift;;
+			--help)		flag_help='true'; shift;;
+			--usage)	flag_usage='true'; shift;;
+			--)			shift;	break;;
+			--*)		echo "mcsvutils: Invalid option $1" >&2;	usage >&2;	return 2;;
+			-*)
+				if [[ $1 =~ i ]]; then flag_stdin='true'; fi
+				if [[ $1 =~ f ]]; then flag_file='true'; fi
+				if [[ $1 =~ h ]]; then flag_help='true'; fi
+				shift
+				;;
+			*)			args+=("$1");	shift;;
+		esac done
+		while (( $# > 0 )); do 
+			args+=("$1");	shift;
+		done
+
+		[ -z "$flag_help" ] || { help; return; }
+		[ -z "$flag_usage" ] || { usage; return; }
+		assert_precond || return
+		[ ${#args[@]} -le 1 ] || echo "mcsvutils: Trailing arguments will ignore." >&2
+		[ ${#opts_jvm[@]} -le 0 ] || [ -z "$flag_clear_jvmopts" ] || {
+			echo "--option flag and --clear-options are exclusive." >&2
+			return 2
+		}
+		[ ${#opts_arg[@]} -le 0 ] || [ -z "$flag_clear_args" ] || {
+			echo "--arg flag and --clear-args are exclusive." >&2
+			return 2
+		}
+
+		local profile
+		if [ -n "$flag_file" ] && [ ${#args[@]} -gt 0 ]; then
+			profile=$(load_json_file "${args[0]}") || return
+		elif [ -n "$flag_file" ]; then
+			echo "mcsvutils: --file option was specified but no file was specified." >&2
+			return 2
+		elif [ -n "$flag_stdin" ]; then
+			profile=$(load_json_stdin) || return
+		elif [ ${#args[@]} -gt 0 ]; then
+			profile=$(load_json_file "${args[0]}") || return
+		else
+			profile=$(load_json_stdin) || return
+		fi
+		[ -n "$profile" ] || { echo "mcsvutils: The input file is empty." >&2; return 1; }
+		local profile_err;	profile_err=$(echo "$profile" | profile_check_integrity)
+		[ "$profile_err" == "OK" ] || [ "$profile_err" == "PROFILE_UPGRADE_NEEDED" ] || {
+			echo "mcsvutils: Profile integrity error: $(echo "$profile_err" | integrity_errstr)" >&2
+			return 1;
+		}
+
+		local p_ver;	p_ver=$(echo "$profile" | jq -c 'if (."@context"|type=="object" and (.version|type=="number")) then ."@context".version else .version end')
+		local -r backwards_compatible_version=3
+		if [ "$profile_err" == "OK" ]; then
+			: No need to upgrade
+		elif [ "$p_ver" -ge "$backwards_compatible_version" ] || [ -n "$flag_allow_destructive_upgrade" ]; then
+			profile="$(echo "$profile" | profile_upgrade)" || return
+		else
+			echo "mcsvutils: Profile data upgrade required, but with breaking changes." >&2
+			echo "mcsvutils: If you still want it to run, add the --allow-destructive-upgrade flag and run it again." >&2
+			return 1
+		fi
+
+		# todo: イメージタグが実際に存在することを確認
+		# todo: jreが実際に存在することを確認
+		# todo: 作業ディレクトリが実際に存在することを確認
+		local p_jvm;	p_jvm="$(jq -nc '$ARGS.positional' --args -- "${opts_jvm[@]}")" || return
+		local p_args;	p_args="$(jq -nc '$ARGS.positional' --args -- "${opts_arg[@]}")" || return
+		# shellcheck disable=SC2016
+		cat_jq_overrideprofile_code() { cat <<<'.+([ if $pname|length>0 then {key:"servicename",value:$pname} else empty end, if $pimgtag|length>0 then {key:"imagetag",value:$pimgtag} else empty end, if $pcwd|length>0 then {key:"cwd",value:$pcwd} else empty end, if $pjre|length>0 then {key:"jre",value:$pjre} else empty end, if $popts|length>0 then {key:"jvm",value:$popts} else empty end, if $optcls|length>0 then {key:"jvm",value:[]} else empty end, if $pargs|length>0 then {key:"arguments",value:$pargs} else empty end, if $argcls|length>0 then {key:"arguments",value:[]} else empty end ]|from_entries)'; }
+		profile=$(echo "$profile" | jq -c -f <(cat_jq_overrideprofile_code) --arg pname "$opt_rename" --arg pimgtag "$opt_image" --arg pcwd "$opt_cwd" --arg pjre "$opt_jre" --argjson popts "$p_jvm" --arg optcls "$flag_clear_jvmopts" --argjson pargs "$p_args" --arg argcls "$flag_clear_args") || return
+
+		profile_err=$(echo "$profile" | profile_check_integrity) || {
+			echo "mcsvutils: Profile integrity error: $(echo "$profile_err" | integrity_errstr)" >&2
+			[ "$profile_err" == "PROFILE_REQUIRED_ELEMENT_MISSING" ] || [ "$profile_err" == "PROFILE_ELEMENT_TYPE_ERROR" ] && {
+				echo "note: The notation to write the execution jar directly in the profile is no longer available." >&2
+				echo "note: Add the jar to the image repository instead and write the image tag." >&2
+			}
+			return 1;
+		}
+
+		jq -c '.' <<-__EOF
+		$profile
+		__EOF
+	} # subcommand_profile_create
+
+	## profile/Analyze args ------------- ##
+
+	local flag_help="$flag_help"
+	local flag_usage="$flag_usage"
+	while (( $# > 0 )); do case $1 in
+		--help)		flag_help='true'; shift;;
+		--usage)	flag_usage='true'; shift;;
+		--*)		echo "mcsvutils: Invalid option $1" >&2;	usage >&2;	return 2;;
+		-*)
+			if [[ $1 =~ h ]]; then flag_help='true'; fi
+			shift
+			;;
+		info)		shift;	subcommand_profile_info "$@";	return;;
+		create)		shift;	subcommand_profile_create "$@";	return;;
+		update)		shift;	subcommand_profile_update "$@";	return;;
+		help)		help;	return;;
+		usage)		usage;	return;;
+		*)			echo "mcsvutils: Invalid subcommand $1" >&2;	usage >&2;	return 2;;
+	esac done
+	[ -z "$flag_help" ] || { help; return; }
+	[ -z "$flag_usage" ] || { usage; return; }
+	echo "mcsvutils: Subcommand not specified" >&2;	usage >&2;	return 2
+} # subcommand_profile
+
+subcommand_server() {
+	## server/Help ---------------------- ##
+
+	local -r allowed_subcommands=("status" "run" "exec" "stop" "help" "usage")
+	usage() {
+		cat <<- __EOF
+		usage: $0 image <subcommand> ...
+		subcommands: ${allowed_subcommands[@]}
+		__EOF
+	}
+	help() {
+		cat <<- __EOF
+		mcsvutils server - Manage server instance
+
+		usage: $0 image <subcommand> ...
+		subcommands: ${allowed_subcommands[@]}
+		  status   Show server status
+		  run      Start server
+		  exec     Send command to server
+		  stop     Stop server
+		  help     Show this help
+		  usage    Show usage
+
+		For detailed help on each subcommand, add the --help option to subcommand.
+
+		options:
+		  --help | -h Show help
+		  --usage     Show usage
+		  --          Do not parse subsequent options
+		__EOF
+	}
+	## server/Subcommands --------------- ##
+
+	subcommand_server_status() {
+		## server/status/Help --------------- ##
+
+		usage() {
+			cat <<- __EOF
+			usage: $0 server status [<options> ...] <profile>
+			profile: path to profile
+			__EOF
+		}
+		help() {
+			cat <<- __EOF
+			mcsvutils server status - Show server status
+
+			usage: $0 server status [<options> ...] <profile>
+			profile: path to profile
+
+			options:
+			  --help | -h
+			    Show help
+			  --usage
+			    Show usage
+
+			If the server is running, it prints its status in JSON and returns 0.
+			Otherwise it outputs null and returns a non-zero value.
+			__EOF
+		}
+
+		## server/status/Analyze args ------- ##
+
+		local argi=1
+		local arg_profile=
+		local args=()
+		local flag_help="$flag_help"
+		local flag_usage="$flag_usage"
+		while (( $# > 0 )); do case $1 in
+			--help)		flag_help='true'; shift;;
+			--usage)	flag_usage='true'; shift;;
+			--)			shift;	break;;
+			--*)		echo "mcsvutils: Invalid option $1" >&2;	usage >&2;	return 2;;
+			-*)
+				if [[ $1 =~ h ]]; then flag_help='true'; fi
 				shift
 				;;
 			*)
-				args=("${args[@]}" "$1")
-				shift
-				;;
-		esac
-	done
-	while (( $# > 0 ))
-	do
-		args=("${args[@]}" "$1")
-		shift
-	done
+				if [ $argi -eq 1 ]; then arg_profile="$1"; (( argi++ )) else args+=("$1"); fi; shift;;
+		esac done
+		while (( $# > 0 )); do 
+			if [ $argi -eq 1 ]; then arg_profile="$1"; (( argi++ )) else args+=("$1"); fi; shift
+		done
 
-	[ -n "$helpflag" ] && { version; echo; usage; echo; help; return; }
-	[ -n "$usageflag" ] && { usage; return; }
-	if check ;then
-		echo "mcsvutils: チェックに成功しました。"
-		return $RESPONCE_POSITIVE
-	else
-		echo "mcsvutils: チェックに失敗しました。"
-		return $RESPONCE_NEGATIVE
-	fi
-}
+		[ -z "$flag_help" ] || { help; return; }
+		[ -z "$flag_usage" ] || { usage; return; }
+		assert_precond || return
 
-action_version()
-{
-	version
-	return $RESPONCE_POSITIVE
-}
-
-action_usage()
-{
-	usage
-	return $RESPONCE_POSITIVE
-}
-
-action_help()
-{
-	version
-	echo
-	usage
-	echo
-	help
-	return $RESPONCE_POSITIVE
-}
-
-action_none()
-{
-	if [ "$helpflag" != "" ]; then
-		action_help
-		return $?
-	elif [ "$usageflag" != "" ]; then
-		action_usage
-		return $?
-	elif [ "$versionflag" != "" ]; then
-		action_version
-		return $?
-	else
-		echoerr "mcsvutils: [E] アクションが指定されていません。"
-		usage >&2
-		return $RESPONCE_ERROR
-	fi
-}
-
-# Analyze arguments --------------------
-subcommand=""
-if [[ $1 =~ -.* ]] || [ "$1" = "" ]; then
-	subcommand="none"
-	while (( $# > 0 ))
-	do
-		case $1 in
-			--help) 	helpflag='--help'; shift;;
-			--usage)	usageflag='--usage'; shift;;
-			--version)	versionflag='--version'; shift;;
-			--*)	echo_invalid_flag "$1"; shift;;
-			-*)
-				[[ "$1" =~ h ]] && { helpflag='-h'; }
-				[[ "$1" =~ v ]] && { versionflag='-v'; }
-				shift
-				;;
-			*)	break;;
-		esac
-	done
-else
-	for item in "${SUBCOMMANDS[@]}"
-	do
-		[ "$item" == "$1" ] && {
-			subcommand="$item"
-			shift
-			break
+		local profile
+		if [ -n "$arg_profile" ]; then
+			profile=$(load_json_file "$arg_profile") || return
+		else
+			echo "mcsvutils: No file was specified." >&2
+			return 2
+		fi
+		[ -n "$profile" ] || {
+			echo "mcsvutils: The input file is empty." >&2
+			jq -nec 'null'
+			return 1
 		}
-	done
-fi
+		local profile_err
+		profile_err=$(echo "$profile" | profile_check_integrity) || {
+			echo "mcsvutils: Profile integrity error: $(echo "$profile_err" | integrity_errstr)" >&2
+			jq -nec 'null'
+			return 1
+		}
 
-if [ -n "$subcommand" ]
-	then "action_$subcommand" "$@"; exit $?
-	else echoerr "mcsvutils: [E] 無効なアクションを指定しました。"; usage >&2; exit $RESPONCE_ERROR
-fi
+		local servicename
+		servicename=$(echo "$profile" | jq -r -f <(cat <<<'.servicename')) || return
+		local runtime="$MCSVUTILS_RUNTIME/$servicename"
+		[ -d "$runtime" ] || { jq -nec 'null'; return; }
+		[ -f "$runtime/status" ] || { jq -nec 'null'; return; }
+		jq -c '.' "$runtime/status" >/dev/null || { jq -nec 'null'; return; }
+		local server_pid
+		server_pid=$(jq -r '.pid' "$runtime/status") || { jq -nec 'null'; return; }
+
+		[ -d "/proc/$server_pid" ] || { jq -nec 'null'; return; }
+		local pstat
+		pstat=$(process_stat "$server_pid")
+		# shellcheck disable=SC2016
+		jq -ec -f <(cat <<<'if .pid==$pstat.[0].pid and .start_time==$pstat.[0].start_time then (.+{ process: ($pstat.[0]|{ state, vsize }) }) else null end') --slurpfile pstat <(echo "$pstat") "$runtime/status"
+	} # subcommand_server_status
+
+	subcommand_server_run() {
+		## server/run/Help ------------------ ##
+
+		usage() {
+			cat <<- __EOF
+			usage: $0 server run [<options> ...] <profile> [<argument> ...]
+			profile: path to profile
+			argument: Override arguments to use at startup
+			__EOF
+		}
+		help() {
+			cat <<- __EOF
+			mcsvutils server run - Start server
+
+			usage: $0 server run [<options> ...] <profile> [<argument> ...]
+			profile: path to profile
+			argument: Override arguments to use at startup
+
+			options:
+			  --cwd <path>
+			    Override the working directory configuration
+			  --jre <path>
+			    Override the Java runtime path configuration
+			  --jvm <option>
+			    Override jvm arguments to use at startup
+			    You can include multiple options by specifying them multiple times.
+			  --override-args / --append-after-args / --append-before-args
+			    Select how to handle arguments when they are entered (default: --override-args)
+			    --override-args overrides the argument list with the specified arguments.
+			    --append-after-args appends the specified arguments after the profile's default arguments.
+			    --append-before-args is similar to --append-after-args but appends before the profile default arguments.
+			    If these arguments are specified at the same time, it will be overwritten by the last specified.
+			  --help | -h
+			    Show help
+			  --usage
+			    Show usage
+			__EOF
+		}
+
+		## server/run/Analyze args ---------- ##
+
+		local opt_cwd=
+		local opt_jre=
+		local opts_jvm=()
+		local opt_argsmixmode='override'
+		local argi=1
+		local arg_profile=
+		local args=()
+		local flag_help="$flag_help"
+		local flag_usage="$flag_usage"
+		while (( $# > 0 )); do case $1 in
+			--cwd)		shift;	opt_cwd="$1";	shift;;
+			--jre)		shift;	opt_jre="$1";	shift;;
+			--jvm)		shift;	opts_jvm+=("$1");	shift;;
+			--override-args)
+				opt_argsmixmode='override';	shift;;
+			--append-after-args)
+				opt_argsmixmode='append-after';	shift;;
+			--append-before-args)
+				opt_argsmixmode='append-before';	shift;;
+			--help)		flag_help='true'; shift;;
+			--usage)	flag_usage='true'; shift;;
+			--)			shift;	break;;
+			--*)		echo "mcsvutils: Invalid option $1" >&2;	usage >&2;	return 2;;
+			-*)
+				if [[ $1 =~ h ]]; then flag_help='true'; fi
+				shift
+				;;
+			*)
+				if [ $argi -eq 1 ]; then arg_profile="$1"; (( argi++ )) else args+=("$1"); fi; shift;;
+		esac done
+		while (( $# > 0 )); do 
+			if [ $argi -eq 1 ]; then arg_profile="$1"; (( argi++ )) else args+=("$1"); fi; shift
+		done
+
+		[ -z "$flag_help" ] || { help; return; }
+		[ -z "$flag_usage" ] || { usage; return; }
+		assert_precond || return
+		local override_args
+		# shellcheck disable=SC2016
+		override_args=$(jq -nc -f <(cat <<<'$ARGS.positional') --args -- "${args[@]}") || return
+		local override_jvms
+		# shellcheck disable=SC2016
+		override_jvms=$(jq -nc -f <(cat <<<'$ARGS.positional') --args -- "${opts_jvm[@]}") || return
+
+		local profile
+		if [ -n "$arg_profile" ]; then
+			profile=$(load_json_file "$arg_profile") || return
+		else
+			echo "mcsvutils: No file was specified." >&2
+			return 2
+		fi
+		[ -n "$profile" ] || { echo "mcsvutils: The input file is empty." >&2; return 1; }
+		local profile_err
+		profile_err=$(echo "$profile" | profile_check_integrity) || {
+			echo "mcsvutils: Profile integrity error: $(echo "$profile_err" | integrity_errstr)" >&2
+			return 1;
+		}
+
+		local servicename
+		servicename=$(echo "$profile" | jq -r -f <(cat <<<'.servicename')) || return
+		! server_check_running "$servicename" || {
+			echo "mcsvutils: Server already running." >&2
+			return 1
+		}
+
+		# todo: イメージが存在しない場合にMinecraftイメージマニフェストからの探索を施行する
+		local image
+		image=$(subcommand_image info -j -- "$(echo "$profile" | jq -r '.imagetag')") || return
+		local image_path
+		image_path=$(imagerepo_normalize_path "$(echo "$image" | jq -r 'if .type=="image" then .path elif .type=="alias" then .reference.path else empty end')") || return
+		[ -n "$image_path" ] || {
+			echo "mcsvutils: No image is associated with the tag" >&2
+			return 1
+		}
+		[ -f "$image_path" ] || {
+			echo "mcsvutils: File corresponding to image not found" >&2
+			return 1
+		}
+		local image_size
+		image_size=$(wc -c -- "$image_path")
+		echo "$image" | jq -e --arg imgsize "$image_size" '(if .type=="image" then .size elif .type=="alias" then .reference.size else empty end) as $db_imgsize|($imgsize|gsub("(?<s>[0-9]+) .*$"; .s)|tonumber) as $act_imgsize|($db_imgsize//$act_imgsize)==$act_imgsize' >/dev/null || {
+			echo "mcsvutils: Image corruption detected. Abort" >&2
+			return 1
+		}
+		local image_sha1
+		image_sha1=$(echo "$image" | jq -r 'if .type=="image" then .sha1 elif .type=="alias" then .reference.sha1 else empty end // ""')
+		if [ -n "$image_sha1" ]; then
+			sha1sum --quiet -c <<<"$image_sha1 *$image_path" || { echo "mcsvutils: Image corruption detected. Abort" >&2; return 1; }
+		fi
+		local image_sha256
+		image_sha256=$(echo "$image" | jq -r 'if .type=="image" then .sha256 elif .type=="alias" then .reference.sha256 else empty end // ""')
+		if [ -n "$image_sha256" ]; then
+			sha256sum --quiet -c <<<"$image_sha256 *$image_path" || { echo "mcsvutils: Image corruption detected. Abort" >&2; return 1; }
+		fi
+
+		local workingdir
+		# shellcheck disable=SC2016
+		workingdir=$(readlink -m -- "$(echo "$profile" | jq -r -f <(cat <<<'($override_cwd|if length>0 then . else null end)//.cwd//"."') --arg override_cwd "$opt_cwd")") || return
+		local invocation
+		# shellcheck disable=SC2016
+		invocation=$(echo "$profile" | jq -r -f <(cat <<<'([($override_jre|if length>0 then . else null end)//.jre//"java"]+(($override_jvm|if length>0 then . else null end)//.jvm//[])+["-jar", $image_path]+(if $arg_mode=="override" then (($override_args|if length>0 then . else null end)//.arguments//[]) elif $arg_mode=="append-after" then ((.arguments//[])+$override_args) elif $arg_mode=="append-before" then ($override_args+(.arguments//[])) else ("Invalid argument mix mode"|error) end))|@sh') --arg image_path "$image_path" --argjson override_args "$override_args" --arg arg_mode "$opt_argsmixmode" --argjson override_jvm "$override_jvms" --arg override_jre "$opt_jre") || return
+
+		mkdir -p "$workingdir" || return
+		local runtime="$MCSVUTILS_RUNTIME/$servicename"
+		server_cleanup() {
+			[ -z "$runtime" ] || rm -rf "${runtime:?}"
+		}
+		mkdir -p "$runtime" || return
+		trap server_cleanup RETURN
+		local con
+		con=$(mktemp -p "$runtime" con.XXXXXXXXXX) || return
+		rm "$con"
+		mkfifo -m 'u=rw,go=' -- "$con" || return
+		notify_con() {
+			local f;	f=$(lsof -Fp "$con" | sed -e 's/p//g')
+			# shellcheck disable=SC2086
+			[ -z "$f" ] || kill -int $f
+		}
+		server_main() {
+			trap notify_con RETURN
+			# shellcheck disable=SC2086
+			cd "$workingdir" && eval $invocation <"$con" &
+			local server_pid=$!
+			# shellcheck disable=SC2016
+			process_stat "$server_pid" | jq -c -f <(cat <<<'{ servicename: $profile.[0].servicename, profile: $profile.[0], launch_config: { jre: (($override_jre|if length>0 then . else null end)//$profile.[0].jre//"java"), jvm: (($override_jvm.[0]|if length>0 then . else null end)//$profile.[0].jvm//[]), arguments: (if $arg_mode=="override" then (($override_args.[0]|if length>0 then . else null end)//$profile.[0].arguments//[]) elif $arg_mode=="append-after" then (($profile.[0].arguments//[])+$override_args.[0]) elif $arg_mode=="append-before" then ($override_args.[0]+($profile.[0].arguments//[])) else (null) end), cwd: (($override_cwd|if length>0 then . else null end)//.cwd//".") }, pid, start_time, console: $console }') --arg console "$con" --slurpfile profile <(echo "$profile") --arg override_cwd "$opt_cwd" --slurpfile override_args <(echo "$override_args") --arg arg_mode "$opt_argsmixmode" --slurpfile override_jvm <(echo "$override_jvms") --arg override_jre "$opt_jre" >"$runtime/status" || return
+			wait "$server_pid"
+		}
+		server_main &
+		local runner_pid=$!
+		server_input() {
+			trap notify_con RETURN
+			while ps -p "$runner_pid" >/dev/null; do
+				read -r c
+				[ -z "$c" ] || echo "$c"
+			done
+		}
+		(server_input) >"$con"
+		return 0
+	} # subcommand_server_run
+
+	subcommand_server_exec() {
+		## server/exec/Help ----------------- ##
+
+		usage() {
+			cat <<- __EOF
+			usage: $0 server exec [<options> ...] <profile> <command>
+			profile: path to profile
+			command: command to send to server
+			__EOF
+		}
+		help() {
+			cat <<- __EOF
+			mcsvutils server exec - Send command to server
+
+			usage: $0 server exec [<options> ...] <profile> <command>
+			profile: path to profile
+			command: command to send to server
+
+			options:
+			  --help | -h
+			    Show help
+			  --usage
+			    Show usage
+
+			No execution results are displayed on the console.
+			__EOF
+		}
+
+		## server/exec/Analyze args --------- ##
+
+		local argi=1
+		local arg_profile=
+		local args_command=()
+		local flag_help="$flag_help"
+		local flag_usage="$flag_usage"
+		while (( $# > 0 )); do case $1 in
+			--help)		flag_help='true'; shift;;
+			--usage)	flag_usage='true'; shift;;
+			--)			shift;	break;;
+			--*)		echo "mcsvutils: Invalid option $1" >&2;	usage >&2;	return 2;;
+			-*)
+				if [[ $1 =~ h ]]; then flag_help='true'; fi
+				shift
+				;;
+			*)
+				if [ $argi -eq 1 ]; then arg_profile="$1"; (( argi++ )) else args_command+=("$1"); fi; shift;;
+		esac done
+		while (( $# > 0 )); do 
+			if [ $argi -eq 1 ]; then arg_profile="$1"; (( argi++ )) else args_command+=("$1"); fi; shift
+		done
+
+		[ -z "$flag_help" ] || { help; return; }
+		[ -z "$flag_usage" ] || { usage; return; }
+		assert_precond || return
+
+		local profile
+		if [ -n "$arg_profile" ]; then
+			profile=$(load_json_file "$arg_profile") || return
+		else
+			echo "mcsvutils: No file was specified." >&2
+			return 2
+		fi
+		[ -n "$profile" ] || {
+			echo "mcsvutils: The input file is empty." >&2
+			jq -nec 'null'
+			return 1
+		}
+		local profile_err
+		profile_err=$(echo "$profile" | profile_check_integrity) || {
+			echo "mcsvutils: Profile integrity error: $(echo "$profile_err" | integrity_errstr)" >&2
+			jq -nec 'null'
+			return 1
+		}
+
+		local servicename
+		servicename=$(echo "$profile" | jq -r -f <(cat <<<'.servicename')) || return
+		server_check_running "$servicename" || {
+			echo "mcsvutils: Server not running." >&2
+			return 1
+		}
+		local runtime="$MCSVUTILS_RUNTIME/$servicename"
+		local endpoint_path
+		endpoint_path=$(jq -r '.console' "$runtime/status") || {
+			echo "mcsvutils: Server console endpoint missing." >&2
+			return 1
+		}
+		[ -p "$endpoint_path" ] || {
+			echo "mcsvutils: Server console endpoint missing." >&2
+			return 1
+		}
+		echo "${args_command[@]}" >"$endpoint_path"
+	} # subcommand_server_exec
+
+	subcommand_server_stop() {
+		## server/stop/Help ----------------- ##
+
+		usage() {
+			cat <<- __EOF
+			usage: $0 server stop [<options> ...] <profile>
+			profile: path to profile
+			__EOF
+		}
+		help() {
+			cat <<- __EOF
+			mcsvutils server stop - Stop server
+
+			usage: $0 server stop [<options> ...] <profile>
+			profile: path to profile
+
+			options:
+			  --help | -h
+			    Show help
+			  --usage
+			    Show usage
+			__EOF
+		}
+
+		## server/stop/Analyze args --------- ##
+
+		local argi=1
+		local arg_profile=
+		local args=()
+		local flag_help="$flag_help"
+		local flag_usage="$flag_usage"
+		while (( $# > 0 )); do case $1 in
+			--help)		flag_help='true'; shift;;
+			--usage)	flag_usage='true'; shift;;
+			--)			shift;	break;;
+			--*)		echo "mcsvutils: Invalid option $1" >&2;	usage >&2;	return 2;;
+			-*)
+				if [[ $1 =~ h ]]; then flag_help='true'; fi
+				shift
+				;;
+			*)
+				if [ $argi -eq 1 ]; then arg_profile="$1"; (( argi++ )) else args+=("$1"); fi; shift;;
+		esac done
+		while (( $# > 0 )); do 
+			if [ $argi -eq 1 ]; then arg_profile="$1"; (( argi++ )) else args+=("$1"); fi; shift
+		done
+
+		[ -z "$flag_help" ] || { help; return; }
+		[ -z "$flag_usage" ] || { usage; return; }
+		assert_precond || return
+		[ ${#args[@]} -le 0 ] || echo "mcsvutils: Trailing arguments will ignore." >&2
+
+		local profile
+		if [ -n "$arg_profile" ]; then
+			profile=$(load_json_file "$arg_profile") || return
+		else
+			echo "mcsvutils: No file was specified." >&2
+			return 2
+		fi
+		[ -n "$profile" ] || {
+			echo "mcsvutils: The input file is empty." >&2
+			jq -nec 'null'
+			return 1
+		}
+		local profile_err
+		profile_err=$(echo "$profile" | profile_check_integrity) || {
+			echo "mcsvutils: Profile integrity error: $(echo "$profile_err" | integrity_errstr)" >&2
+			jq -nec 'null'
+			return 1
+		}
+
+		local servicename
+		servicename=$(echo "$profile" | jq -r -f <(cat <<<'.servicename')) || return
+		server_check_running "$servicename" || {
+			echo "mcsvutils: Server not running." >&2
+			return 1
+		}
+		local runtime="$MCSVUTILS_RUNTIME/$servicename"
+		local endpoint_path
+		endpoint_path=$(jq -r '.console' "$runtime/status") || {
+			echo "mcsvutils: Server console endpoint missing." >&2
+			return 1
+		}
+		[ -p "$endpoint_path" ] || {
+			echo "mcsvutils: Server console endpoint missing." >&2
+			return 1
+		}
+		echo "stop" >"$endpoint_path"
+	} # subcommand_server_stop
+
+	## server/Analyze args -------------- ##
+
+	local flag_help="$flag_help"
+	local flag_usage="$flag_usage"
+	while (( $# > 0 )); do case $1 in
+		--help)		flag_help='true'; shift;;
+		--usage)	flag_usage='true'; shift;;
+		--*)		echo "mcsvutils: Invalid option $1" >&2;	usage >&2;	return 2;;
+		-*)
+			if [[ $1 =~ h ]]; then flag_help='true'; fi
+			shift
+			;;
+		run)		shift;	subcommand_server_run "$@";	return;;
+		exec)		shift;	subcommand_server_exec "$@";	return;;
+		stop)		shift;	subcommand_server_stop "$@";	return;;
+		status)		shift;	subcommand_server_status "$@";	return;;
+		help)		help;	return;;
+		usage)		usage;	return;;
+		*)			echo "mcsvutils: Invalid subcommand $1" >&2;	usage >&2;	return 2;;
+	esac done
+	[ -z "$flag_help" ] || { help; return; }
+	[ -z "$flag_usage" ] || { usage; return; }
+	echo "mcsvutils: Subcommand not specified" >&2;	usage >&2;	return 2
+} # subcommand_server
+
+subcommand_image() {
+	## image/Help ----------------------- ##
+
+	local -r allowed_subcommands=("list" "info" "add" "alias" "remove" "update" "init" "help" "usage")
+	usage() {
+		cat <<- __EOF
+		usage: $0 image <subcommand> ...
+		subcommands: ${allowed_subcommands[@]}
+		__EOF
+	}
+	help() {
+		cat <<- __EOF
+		mcsvutils image - Manage Minecraft server image repository
+
+		usage: $0 image <subcommand> ...
+		subcommands: ${allowed_subcommands[@]}
+		  list     Show image list
+		  info     Show image infomation
+		  add      Add server image into image repository
+		  alias    Create alias for server image
+		  remove   Remove server image from image repository
+		  update   Update image repository
+		  init     (re)Initialize image repository
+		  help     Show this help
+		  usage    Show usage
+
+		For detailed help on each subcommand, add the --help option to subcommand.
+
+		options:
+		  --help | -h Show help
+		  --usage     Show usage
+		  --          Do not parse subsequent options
+		__EOF
+	}
+	## image/Subcommands ---------------- ##
+
+	subcommand_image_list() {
+		## image/list/Help ------------------ ##
+
+		usage() {
+			cat <<- __EOF
+			usage: $0 image list [<options> ...] [<query> ...]
+			query: regexp query of server image tag
+			__EOF
+		}
+		help() {
+			cat <<- __EOF
+			mcsvutils image list - Show image list
+
+			usage: $0 image list [<options> ...] [<query> ...]
+			query: regexp query of server image tag
+
+			options:
+			  --id | -i
+			    List images with matching (or all) ID
+			  --alias | -n
+			    List images with matching (or all) alias
+			  --json | -j
+			    Outputs the results in JSON
+			  --help | -h
+			    Show help
+			  --usage
+			    Show usage
+
+			This command returns an exit code of 0 even if nothing is found.
+			Use info if you want to check that the specified tag exists.
+			__EOF
+		}
+
+		## image/list/Analyze args ---------- ##
+
+		local flag_id=
+		local flag_alias=
+		local flag_json=
+		local args_query=()
+		local flag_help="$flag_help"
+		local flag_usage="$flag_usage"
+		while (( $# > 0 )); do case $1 in
+			--id)		flag_id='true';	shift;;
+			--alias)	flag_alias='true'; shift;;
+			--json)		flag_json='true'; shift;;
+			--help)		flag_help='true'; shift;;
+			--usage)	flag_usage='true'; shift;;
+			--)			shift;	break;;
+			--*)		echo "mcsvutils: Invalid option $1" >&2;	usage >&2;	return 2;;
+			-*)
+				if [[ $1 =~ i ]]; then flag_id='true'; fi
+				if [[ $1 =~ n ]]; then flag_alias='true'; fi
+				if [[ $1 =~ j ]]; then flag_json='true'; fi
+				if [[ $1 =~ h ]]; then flag_help='true'; fi
+				shift
+				;;
+			*)			args_query+=("$1");	shift;;
+		esac done
+		while (( $# > 0 )); do 
+			args_query+=("$1");	shift
+		done
+
+		[ -z "$flag_help" ] || { help; return; }
+		[ -z "$flag_usage" ] || { usage; return; }
+		assert_precond || return
+
+		local repo;	repo=$(imagerepo_load) || return
+		local repo_err;	repo_err=$(echo "$repo" | imagerepo_check_integrity) || {
+			echo "mcsvutils: Repository integrity error: $(echo "$repo_err" | integrity_errstr)" >&2
+			return 1
+		}
+
+		# shellcheck disable=SC2016
+		cat_jq_finder_code() { cat <<<'map(. as $i|select(([($find_id or ($find_alias|not)) and .type=="image", ($find_alias or ($find_id|not)) and .type=="alias"]|any) and ($ARGS.positional|if length>0 then any(. as $query|$i.id|test($query)) else true end)))|sort_by(.id)'; }
+		# shellcheck disable=SC2016
+		cat_jq_echo_code() { cat <<<'|.[]|if (.type=="alias") then (.id+" -> "+(.reference.id? // "<dangling reference>")) else .id end'; }
+
+		if [ "$flag_json" == 'true' ]; then
+			echo "$repo" | imagerepo_list_tags | jq -c --argjson find_id "${flag_id:-false}" --argjson find_alias "${flag_alias:-false}" "$(cat_jq_finder_code)" --args -- "${args_query[@]}"
+		else
+			echo "$repo" | imagerepo_list_tags | jq -r --argjson find_id "${flag_id:-false}" --argjson find_alias "${flag_alias:-false}" "$(cat_jq_finder_code; cat_jq_echo_code)" --args -- "${args_query[@]}"
+		fi
+	} # subcommand_image_list
+
+	subcommand_image_info() {
+		## image/info/Help ------------------ ##
+
+		usage() {
+			cat <<- __EOF
+			usage: $0 image info [<options> ...] <imagetag>
+			imagetag: server image tag
+			__EOF
+		}
+		help() {
+			cat <<- __EOF
+			mcsvutils image info - Show image infomation
+
+			usage: $0 image info [<options> ...] <imagetag>
+			imagetag: server image tag
+
+			options:
+			  --json | -j
+			    Outputs the results in JSON
+			  --help | -h
+			    Show help
+			  --usage
+			    Show usage
+			__EOF
+		}
+
+		## image/info/Analyze args ---------- ##
+
+		local flag_json=
+		local argi=1
+		local arg_image=
+		local args=()
+		local flag_help="$flag_help"
+		local flag_usage="$flag_usage"
+		while (( $# > 0 )); do case $1 in
+			--json)		flag_json='true'; shift;;
+			--help)		flag_help='true'; shift;;
+			--usage)	flag_usage='true'; shift;;
+			--)			shift;	break;;
+			--*)		echo "mcsvutils: Invalid option $1" >&2;	usage >&2;	return 2;;
+			-*)
+				if [[ $1 =~ j ]]; then flag_json='true'; fi
+				if [[ $1 =~ h ]]; then flag_help='true'; fi
+				shift
+				;;
+			*)
+				if [ "$argi" -eq 1 ]; then arg_image="$1"; ((argi++)); else args+=("$1"); fi;	shift;;
+		esac done
+		while (( $# > 0 )); do
+			if [ "$argi" -eq 1 ]; then arg_image="$1"; ((argi++)); else args+=("$1"); fi;	shift
+		done
+
+		[ -z "$flag_help" ] || { help; return; }
+		[ -z "$flag_usage" ] || { usage; return; }
+		assert_precond || return
+		[ "$argi" -gt 1 ] || { echo "mcsvutils: Too few arguments" >&2; usage >&2; return 2; }
+		[ ${#args[@]} -le 0 ] || echo "mcsvutils: Trailing arguments will ignore." >&2
+
+		local repo;	repo=$(imagerepo_load) || return
+		local repo_err;	repo_err=$(echo "$repo" | imagerepo_check_integrity) || {
+			echo "mcsvutils: Repository integrity error: $(echo "$repo_err" | integrity_errstr)" >&2
+			return 1
+		}
+
+		echo "$repo" | imagerepo_tag_is_exist "$arg_image" || { echo "mcsvutils: imagetag not found" >&2; return 1; }
+		if [ "$flag_json" == 'true' ]; then
+			echo "$repo" | imagerepo_get_by_tag "$arg_image"
+		else
+			# shellcheck disable=SC2016
+			echo "$repo" | imagerepo_get_by_tag "$arg_image" | jq -r '[.id]+if .type=="alias" and (.reference|type=="object") then ["alias for \(.reference.id)", "path: \(.reference.path)", (.reference|if has("size") and (.size|type=="number") then "size: \(.size)" else empty end), (.reference|if has("sha1") and (.sha1|type=="string") then "sha1: \(.sha1)" else empty end), (.reference|if has("sha256") and (.sha256|type=="string") then "sha256: \(.sha256)" else empty end)] elif .type=="alias" then ["<dangling reference>"] else ["path: \(.path)", if has("size") and (.size|type=="number") then "size: \(.size)" else empty end, if has("sha1") and (.sha1|type=="string") then "sha1: \(.sha1)" else empty end, if has("sha256") and (.sha256|type=="string") then "sha256: \(.sha256)" else empty end] end|join("\n")'
+		fi
+	} # subcommand_image_info
+
+	subcommand_image_add() {
+		## image/add/Help ------------------- ##
+
+		usage() {
+			cat <<- __EOF
+			usage: $0 image add [<options> ...] [<alias> ...] <image>
+			alias: alias to give to this image when adding
+			image: path to Minacraft server image
+			__EOF
+		}
+		help() {
+			cat <<- __EOF
+			mcsvutils image add - Add server image into image repository
+
+			usage: $0 image add [<options> ...] [<alias> ...] <image>
+			alias: alias to give to this image when adding
+			image: path to Minacraft server image
+
+			options:
+			  --copy
+			    Copy the server image to the image repository (default)
+			    If specified at the same time as --link, it will be overwritten by the last specified.
+			  --link | l
+			    Create a hard link for the server image to the image repository
+			    If specified at the same time as --copy, it will be overwritten by the last specified.
+			  --help | -h
+			    Show help
+			  --usage
+			    Show usage
+			__EOF
+		}
+
+		## image/add/Analyze args ----------- ##
+
+		local addition_behavior='copy'
+		local argi=1
+		local arg_imgpath=
+		local arg_aliases=()
+		local flag_help="$flag_help"
+		local flag_usage="$flag_usage"
+		while (( $# > 0 )); do case $1 in
+			--copy)		addition_behavior='copy'; shift;;
+			--link)		addition_behavior='link'; shift;;
+			--help)		flag_help='true'; shift;;
+			--usage)	flag_usage='true'; shift;;
+			--)			shift;	break;;
+			--*)		echo "mcsvutils: Invalid option $1" >&2;	usage >&2;	return 2;;
+			-*)
+				if [[ $1 =~ l ]]; then addition_behavior='link'; fi
+				if [[ $1 =~ h ]]; then flag_help='true'; fi
+				shift
+				;;
+			*)
+				if [ $argi -eq 1 ]; then
+					arg_imgpath="$1";	((argi++))
+				else
+					arg_aliases+=("$arg_imgpath")
+					arg_imgpath="$1"
+				fi
+				shift;;
+		esac done
+		while (( $# > 0 )); do 
+			if [ $argi -eq 1 ]; then
+				arg_imgpath="$1";	((argi++))
+			else
+				arg_aliases+=("$arg_imgpath")
+				arg_imgpath="$1"
+			fi
+			shift
+		done
+
+		[ -z "$flag_help" ] || { help; return; }
+		[ -z "$flag_usage" ] || { usage; return; }
+		assert_precond || return
+		[ -n "$arg_imgpath" ] || { echo "mcsvutils: Too few arguments" >&2; usage >&2; return 2; }
+		local aliases;	aliases=$(jq -nc '$ARGS.positional|sort|unique' --args -- "${arg_aliases[@]}") || return
+		[ -e "$arg_imgpath" ] || { echo "mcsvutils: Image not found" >&2; usage >&2; return 1; }
+		[ -f "$arg_imgpath" ] || { echo "mcsvutils: Image is not file" >&2; usage >&2; return 1; }
+
+		local repo;	repo=$(imagerepo_load) || return
+		local repo_err;	repo_err=$(echo "$repo" | imagerepo_check_integrity) || {
+			echo "mcsvutils: Repository integrity error: $(echo "$repo_err" | integrity_errstr)" >&2
+			return 1
+		}
+		echo "$repo" | jq -ec --slurpfile aliases <(echo "$aliases") '(.images+.aliases)|all(.id as $item|$aliases.[0]|all(.!=$item))' >/dev/null || { echo "mcsvutils: alias conflicts with existing tag" >&2; return 1; }
+
+		local img_id;	img_id=$(echo "$repo" | imagerepo_get_new_imageid) || return
+		local img_path
+		imagerepo_mkdir || return
+		case "$addition_behavior" in
+		link)
+			! [ -e "${MCSVUTILS_IMAGE_REPOSITORY:?}/${img_id:?}/$(basename "$arg_imgpath")" ] || { echo "mcsvutils: An entry already exists at the location in the repository. Abort." >&2; return 1; }
+			mkdir -p "$MCSVUTILS_IMAGE_REPOSITORY/${img_id:?}" || return
+			chmod u=rwx,go=rx "$MCSVUTILS_IMAGE_REPOSITORY/${img_id:?}" || return
+			ln -t "$MCSVUTILS_IMAGE_REPOSITORY/${img_id:?}" "$arg_imgpath" || return
+			img_path="${img_id:?}/$(basename "$arg_imgpath")"
+		;;
+		*)
+			! [ -e "${MCSVUTILS_IMAGE_REPOSITORY:?}/${img_id:?}/$(basename "$arg_imgpath")" ] || { echo "mcsvutils: An entry already exists at the location in the repository. Abort." >&2; return 1; }
+			mkdir -p "$MCSVUTILS_IMAGE_REPOSITORY/${img_id:?}" || return
+			chmod u=rwx,go=rx "$MCSVUTILS_IMAGE_REPOSITORY/${img_id:?}" || return
+			cp -t "$MCSVUTILS_IMAGE_REPOSITORY/${img_id:?}" "$arg_imgpath" || return
+			chmod u=rw,go=r "$MCSVUTILS_IMAGE_REPOSITORY/${img_id:?}/$(basename "$arg_imgpath")" || return
+			img_path="${img_id:?}/$(basename "$arg_imgpath")"
+		;;
+		esac
+
+		local img_sha1;	img_sha1=$(sha1sum -b "$MCSVUTILS_IMAGE_REPOSITORY/${img_path:?}" &)
+		local img_sha256;	img_sha256=$(sha256sum -b "$MCSVUTILS_IMAGE_REPOSITORY/${img_path:?}" &)
+		local img_size;	img_size=$(wc -c -- "$MCSVUTILS_IMAGE_REPOSITORY/${img_path:?}" &)
+		wait
+		{ [ -n "$img_sha1" ] && [ -n "$img_sha256" ] && [ -n "$img_size" ]; } || {
+			rm -rf -- "${MCSVUTILS_IMAGE_REPOSITORY:?}/${img_id:?}"
+			return 1
+		}
+
+		# shellcheck disable=SC2016
+		repo=$(echo "$repo" | jq -c --arg imgid "${img_id:?}" --arg imgpath "${img_path:?}" --arg imgsize "${img_size:?}" --arg imgsha1 "${img_sha1:?}" --arg imgsha256 "${img_sha256:?}" --slurpfile aliases <(echo "$aliases") '.images|=(.+[{id:$imgid,path:$imgpath,size:($imgsize|gsub("(?<s>[0-9]+) .*$";.s)|tonumber),sha1:($imgsha1|gsub("(?<s>[0-9a-f]+) .*$";.s)),sha256:($imgsha256|gsub("(?<s>[0-9a-f]+) .*$";.s))}])|.aliases|=(.+($aliases.[0]|map({id: ., reference: $imgid})))') || { rm -rf -- "${MCSVUTILS_IMAGE_REPOSITORY:?}/${img_id:?}"; return 1; }
+		echo "$repo" | imagerepo_save
+	} # subcommand_image_add
+
+	subcommand_image_alias() {
+		## image/alias/Help ----------------- ##
+
+		usage() {
+			cat <<- __EOF
+			usage: $0 image alias [<options> ...] <alias> ... <imagetag>
+			alias: alias to give to this image
+			image: path to Minacraft server image
+			__EOF
+		}
+		help() {
+			cat <<- __EOF
+			mcsvutils image alias - Create alias for server image
+
+			usage: $0 image alias [<options> ...] <alias> ... <imagetag>
+			alias: alias to give to image
+			imagetag: server image tag
+
+			options:
+			  --force | -f
+			    Overwrite existing alias
+			  --help | -h
+			    Show help
+			  --usage
+			    Show usage
+			__EOF
+		}
+
+		## image/alias/Analyzargs ----------- ##
+
+		local flag_force=
+		local flag_help="$flag_help"
+		local flag_usage="$flag_usage"
+		local argi=1
+		local arg_imgtag=
+		local arg_aliases=()
+		while (( $# > 0 )); do case $1 in
+			--force)	flag_force='true'; shift;;
+			--help)		flag_help='true'; shift;;
+			--usage)	flag_usage='true'; shift;;
+			--)			shift;	break;;
+			--*)		echo "mcsvutils: Invalid option $1" >&2;	usage >&2;	return 2;;
+			-*)
+				if [[ $1 =~ f ]]; then flag_force='true'; fi
+				if [[ $1 =~ h ]]; then flag_help='true'; fi
+				shift
+				;;
+			*)
+				if [ $argi -eq 1 ]; then
+					arg_imgtag="$1";	argi=$((argi + 1))
+				else
+					arg_aliases+=("$arg_imgtag");	arg_imgtag="$1"
+				fi
+				shift;;
+		esac done
+		while (( $# > 0 )); do 
+			if [ $argi -eq 1 ]; then
+				arg_imgtag="$1";	argi=$((argi + 1))
+			else
+				arg_aliases+=("$arg_imgtag");	arg_imgtag="$1"
+			fi
+			shift
+		done
+
+		[ -z "$flag_help" ] || { help; return; }
+		[ -z "$flag_usage" ] || { usage; return; }
+		assert_precond || return
+		[ "${#arg_aliases[@]}" -ge 1 ] || { echo "mcsvutils: Too few arguments" >&2; usage >&2; return 2; }
+		local aliases;	aliases=$(jq -nc '$ARGS.positional|sort|unique' --args -- "${arg_aliases[@]}") || return
+
+		local repo;	repo=$(imagerepo_load) || return
+		local repo_err;	repo_err=$(echo "$repo" | imagerepo_check_integrity) || {
+			echo "mcsvutils: Repository integrity error: $(echo "$repo_err" | integrity_errstr)" >&2
+			return 1
+		}
+		echo "$repo" | imagerepo_tag_is_exist "$arg_imgtag" || { echo "mcsvutils: imagetag not found" >&2; return 1; }
+		echo "$repo" | jq -ec --argjson force "${flag_force:-false}" --slurpfile aliases <(echo "$aliases") '(if $force then [] else .aliases end+.images)|all(.id as $item|$aliases.[0]|all(.!=$item))' >/dev/null || { echo "mcsvutils: alias conflicts with existing tag" >&2; [ "$flag_force" == 'true' ] || echo "note: To overwrite an existing alias, use the --force flag" >&2; return 1; }
+
+		repo=$(echo "$repo" | jq -c --slurpfile aliases <(echo "${aliases:?}") --arg target "${arg_imgtag:?}" '(if .images|map(.id)|index($target)!=null then .images.[(.images|map(.id)|index($target))].id elif .aliases|map(.id)|index($target)!=null then .aliases.[(.aliases|map(.id)|index($target))].reference else "imagetag not found"|error end) as $tgtid|.aliases|=(map(select(. as $i|$aliases.[0]|all(.!=$i.name)))+($aliases.[0]|map({id:.,reference:$tgtid})))') || return
+		echo "$repo" | imagerepo_save
+	} # subcommand_image_alias
+
+	subcommand_image_remove() {
+		## image/remove/Help ---------------- ##
+
+		usage() {
+			cat <<- __EOF
+			usage: $0 image remove [<options> ...] <imagetag> [<imagetag> ...]
+			image: server image tag
+			__EOF
+		}
+		help() {
+			cat <<- __EOF
+			mcsvutils image remove - Remove server image from image repository
+
+			usage: $0 image remove [<options> ...] <imagetag> [<imagetag> ...]
+			image: server image tag
+
+			options:
+			  --id | -i
+			    Delete the image with matching ID
+			    It is exclusive with the --dereference flag. If used simultaneously, the last flag specified will override it.
+			  --alias | -n
+			    Delete the image with matching alias
+			  --dereference | -R
+			    Deletes the image pointing to the specified alias instead of deleting the alias
+			    If specify this flag, also specify the --alias flag.
+			    It is exclusive with the --id flag. If used simultaneously, the last flag specified will override it.
+			  --grep | -g
+			    Match by regular expression instead of exact match
+			  --force | -f
+			    Do not ask if multiple images are deleted
+			  --help | -h
+			    Show help
+			  --usage
+			    Show usage
+			__EOF
+		}
+
+		## image/remove/Analyze args -------- ##
+
+		local flag_id=
+		local flag_alias=
+		local flag_dereference=
+		local flag_grep=
+		local flag_force=
+		local args_query=()
+		local flag_help="$flag_help"
+		local flag_usage="$flag_usage"
+		while (( $# > 0 )); do case $1 in
+			--id)		flag_id='true';	flag_dereference='false';	shift;;
+			--alias)	flag_alias='true'; shift;;
+			--dereference)
+				flag_dereference='true';	flag_id='false';	flag_alias='true';	shift;;
+			--grep)		flag_grep='true'; shift;;
+			--force)	flag_force='true'; shift;;
+			--help)		flag_help='true'; shift;;
+			--usage)	flag_usage='true'; shift;;
+			--)			shift;	break;;
+			--*)		echo "mcsvutils: Invalid option $1" >&2;	usage >&2;	return 2;;
+			-*)
+				if [[ $1 =~ i ]]; then flag_id='true';	flag_dereference='false'; fi
+				if [[ $1 =~ n ]]; then flag_alias='true'; fi
+				if [[ $1 =~ R ]]; then flag_dereference='true';	flag_id='false';	flag_alias='true'; fi
+				if [[ $1 =~ g ]]; then flag_grep='true'; fi
+				if [[ $1 =~ f ]]; then flag_force='true'; fi
+				if [[ $1 =~ h ]]; then flag_help='true'; fi
+				shift
+				;;
+			*)			args_query+=("$1");	shift;;
+		esac done
+		while (( $# > 0 )); do 
+			args_query+=("$1");	shift
+		done
+
+		[ -z "$flag_help" ] || { help; return; }
+		[ -z "$flag_usage" ] || { usage; return; }
+		assert_precond || return
+		[ ${#args_query[@]} -ge 1 ] || { echo "mcsvutils: Too few arguments" >&2; usage >&2; return 2; }
+
+		local repo;	repo=$(imagerepo_load) || return
+		local repo_err;	repo_err=$(echo "$repo" | imagerepo_check_integrity) || {
+			echo "mcsvutils: Repository integrity error: $(echo "$repo_err" | integrity_errstr)" >&2
+			return 1
+		}
+
+		local target;	target=$(echo "$repo" | jq -c --argjson find_id "${flag_id:-false}" --argjson find_alias "${flag_alias:-false}" --argjson dereference "${flag_dereference:-false}" --argjson grep "${flag_grep:-false}" '{images:(if $find_id or ($find_alias|not) then (.images|map(.id as $i|select($ARGS.positional|any(if $grep then (. as $query|$i|test($query)) else (.==$i) end)))) elif $dereference then ((.aliases|map(.id as $i|select($ARGS.positional|any(if $grep then (. as $query|$i|test($query)) else (.==$i) end)))|map(.reference)) as $target_ids|.images|map(. as $i|select($target_ids|any(.==$i.id)))) else [] end),aliases:((if $find_alias or ($find_id|not) then (.aliases|map(. as $i|select($ARGS.positional|any(if $grep then (. as $query|$i.id|test($query)) else (.==$i.id) end)))) else [] end)+(if $find_id or ($find_alias|not) then (.aliases|map(.reference as $i|select($ARGS.positional|any(if $grep then (. as $query|$i|test($query)) else (.==$i) end)))) elif $dereference then ((.aliases|map(.id as $i|select($ARGS.positional|any(if $grep then (. as $query|$i|test($query)) else (.==$i) end)))|map(.reference)) as $target_ids|.aliases|map(.reference as $i|select($target_ids|any(.==$i)))) else [] end)|map(.id)|unique)}' --args -- "${args_query[@]}") || return
+		echo "$target" | jq -e '((.images|length)+(.aliases|length))>0' >/dev/null || { echo "mcsvutils: nothing to do." >&2; return 1; }
+		if echo "$target" | jq -e --argjson force "${flag_force:-false}" '($force|not) and (.images|length>1)' >/dev/null; then
+			echo "This operation deletes the following $(echo "$target" | jq '.images|length') images." >&2
+			echo "$target" | jq -r '.images|map(.id)|join(" ")'
+			ask_or_no "continue?" || return 1
+		fi
+		repo=$(echo "$repo" | jq -c --slurpfile target <(echo "$target") '.aliases|=map(.id as $item|select($target[0].aliases|all(.!=$item)))|.images|=map(.id as $item|select($target[0].images|all(.id!=$item)))') || return
+		echo "$repo" | imagerepo_save || return
+
+		while IFS= read -r -d $'\0' item <&3; do
+			rm -f -- "${MCSVUTILS_IMAGE_REPOSITORY:?}/${item:?}"
+		done 3< <(echo "$target" | jq --raw-output0 '.images[]|.path')
+		while IFS= read -r -d $'\0' item <&3; do
+			rmdir -- "${MCSVUTILS_IMAGE_REPOSITORY:?}/${item:?}"
+		done 3< <(echo "$target" | jq --raw-output0 '.images[]|.id')
+	} # subcommand_image_remove
+
+	subcommand_image_update() {
+		## image/update/Help ---------------- ##
+
+		usage() {
+			cat <<- __EOF
+			usage: $0 image update [<options> ...]
+			__EOF
+		}
+		help() {
+			cat <<- __EOF
+			mcsvutils image update - Update image repository
+
+			usage: $0 image update [<options> ...]
+
+			options:
+			  --dry | -p
+			    Do not perform any operations, only check the repository status
+			  --force | -f
+			    Perform all operations without interaction
+			    If --dry is specified, this takes precedence.
+			  --hash-recalc | -r
+			    Recalculate checksums for all images
+			  --help | -h
+			    Show help
+			  --usage
+			    Show usage
+			__EOF
+		}
+
+		## image/update/Analyze args -------- ##
+
+		local flag_dry=
+		local flag_force=
+		local flag_hash_recalc=
+		local args=()
+		local flag_help="$flag_help"
+		local flag_usage="$flag_usage"
+		while (( $# > 0 )); do case $1 in
+			--dry)		flag_dry='true'; shift;;
+			--force)	flag_force='true'; shift;;
+			--hash-recalc)
+				flag_hash_recalc='true'; shift;;
+			--help)		flag_help='true'; shift;;
+			--usage)	flag_usage='true'; shift;;
+			--)			shift;	break;;
+			--*)		echo "mcsvutils: Invalid option $1" >&2;	usage >&2;	return 2;;
+			-*)
+				if [[ $1 =~ p ]]; then flag_dry='true'; fi
+				if [[ $1 =~ f ]]; then flag_force='true'; fi
+				if [[ $1 =~ r ]]; then flag_hash_recalc='true'; fi
+				if [[ $1 =~ h ]]; then flag_help='true'; fi
+				shift
+				;;
+			*)
+				args+=("$1")
+				shift;;
+		esac done
+		while (( $# > 0 )); do
+			args+=("$1")
+			shift
+		done
+
+		[ -z "$flag_help" ] || { help; return; }
+		[ -z "$flag_usage" ] || { usage; return; }
+		assert_precond || return
+		[ ${#args[@]} -le 0 ] || echo "mcsvutils: Trailing arguments will ignore." >&2
+
+		local repo;	repo=$(imagerepo_load) || return
+		# todo: リポジトリのバージョンが古い場合にバージョンアップを行う
+		local repo_err;	repo_err=$(echo "$repo" | imagerepo_check_integrity) || {
+			echo "mcsvutils: Repository integrity error: $(echo "$repo_err" | integrity_errstr)" >&2
+			return 1
+		}
+
+		local dangling_aliases='[]'
+		dangling_aliases=$(echo "$repo" | jq -c '.images as $images|.aliases|map(select(.reference as $i|$images|all($i!=.id)))|map(.id)')
+
+		local deletion_candidate='[]'
+		while read -rd $'\0' item; do
+			local img_id
+			img_id=$(echo "$item" | jq -r '.id')
+			local img_path
+			img_path=$(echo "$item" | jq -r '.path')
+			[ -f "$(imagerepo_normalize_path "$img_path")" ] || deletion_candidate=$(echo "$deletion_candidate" | jq -c '.+[$imgid]' --arg imgid "$img_id")
+		done < <(echo "$repo" | jq --raw-output0 '.images[]|tostring')
+
+		local unref_files='[]'
+		unref_files=$( ( while read -rd $'\0' item; do printf '%s\0' "${item#"./"}"; done < <(cd "$MCSVUTILS_IMAGE_REPOSITORY" && find . -type f -print0) ) | jq -Rsc --slurpfile repo <(echo "$repo") 'split("\u0000")|map(. as $i|select([length==0, .=="repository.json", ($repo.[0].images|any(.path==$i))]|any|not))' )
+
+		local recalchash_candidate='[]'
+		recalchash_candidate=$(echo "$repo" | jq -c --argjson recalcall "${flag_hash_recalc:-false}" '.images|map(select(([(.size|type=="number"), (.sha1|type=="string" and length==40), (.sha256|type=="string" and length==64)]|all|not) or $recalcall))|map(.id)')
+
+		echo "$dangling_aliases" | jq -r '"Aliases will remove (dangling): " + (if length>0 then join(" ") else "<none>" end)' >&2
+		echo "$deletion_candidate" | jq -r '"Tags will remove (file not found): " + (if length>0 then join(" ") else "<none>" end)' >&2
+		echo "$unref_files" | jq -r '"Files will delete (unreferenced): " + (if length>0 then "\n" + join(" ") else "<none>" end)' >&2
+		echo "$recalchash_candidate" | jq -r '"Hash recalculation: " + (if length>0 then join(" ") else "<none>" end)' >&2
+
+		[ "$flag_dry" != 'true' ] || return 0
+		jq -ne --slurpfile da <(echo "$dangling_aliases") --slurpfile dt <(echo "$deletion_candidate") --slurpfile uf <(echo "$unref_files") --slurpfile hc <(echo "$recalchash_candidate") '($da.[0] + $dt.[0] + $uf.[0] + $hc.[0])|length>0' >/dev/null || {
+			echo "mcsvutils: nothing to do." >&2
+			return 0
+		}
+		[ "$flag_force" == 'true' ] || {
+			ask_or_no "continue?" || {
+				echo "mcsvutils: Operation cancelled by user" >&2
+				return 1
+			}
+		}
+
+		repo=$(echo "$repo" | jq -c --slurpfile dt <(echo "$deletion_candidate") '.images as $images|.images|=map(.id as $i|select($dt.[0]|all(.!=$i)))|.aliases|=map(.reference as $i|select(($dt.[0]|all(.!=$i)) and ($images|any(.id==$i))))') && echo "$repo" | imagerepo_save
+
+		while read -rd $'\0' item; do
+			local img_path;	img_path=$(echo "$item" | jq -r '.path') || continue
+			local img_sha1;	img_sha1=$(sha1sum -b "$(imagerepo_normalize_path "${img_path:?}")" &)
+			local img_sha256;	img_sha256=$(sha256sum -b "$(imagerepo_normalize_path "${img_path:?}")" &)
+			local img_size;	img_size=$(wc -c -- "$(imagerepo_normalize_path "${img_path:?}")" &)
+			wait
+			{ [ -n "$img_sha1" ] && [ -n "$img_sha256" ] && [ -n "$img_size" ]; } || { continue; }
+			repo=$(echo "$repo" | jq -c --argjson item "$item" --arg imgsize "${img_size:?}" --arg imgsha1 "${img_sha1:?}" --arg imgsha256 "${img_sha256:?}" '(.images[(.images|map(.id)|index($query))]|=($item + {size:($imgsize|gsub("(?<s>[0-9]+) .*$";.s)|tonumber),sha1:($imgsha1|gsub("(?<s>[0-9a-f]+) .*$";.s)),sha256:($imgsha256|gsub("(?<s>[0-9a-f]+) .*$";.s))}))') && echo "$repo" | imagerepo_save
+		done < <(echo "$repo" | jq --raw-output0 --slurpfile hc <(echo "$recalchash_candidate") '.images|map(.id as $i|select($hc.[0]|any(.==$i)))|.[]|tostring')
+
+		while read -rd $'\0' item; do
+			rm -f "$(imagerepo_normalize_path "${item:?}")"
+		done < <(echo "$unref_files" | jq --raw-output0 '.[]')
+		while read -rd $'\0' item; do
+			[ "$item" != "." ] || continue
+			rmdir --ignore-fail-on-non-empty -- "${MCSVUTILS_IMAGE_REPOSITORY:?}/${item#./}"
+		done < <(cd "$MCSVUTILS_IMAGE_REPOSITORY" && find . -type d -print0)
+
+		echo "mcsvutils: done." >&2
+	} # subcommand_image_update
+
+	subcommand_image_init() {
+		## image/init/Help ------------------ ##
+
+		usage() {
+			cat <<- __EOF
+			usage: $0 image init [<options> ...]
+			__EOF
+		}
+		help() {
+			cat <<- __EOF
+			mcsvutils image init - (re)Initialize image repository
+
+			usage: $0 image init [<options> ...]
+
+			options:
+			  --force
+			    Perform operations without interaction
+			  --nuke-repository
+			    Nuke the repository until there's no trace left
+			  --help | -h
+			    Show help
+			  --usage
+			    Show usage
+			__EOF
+		}
+
+		## image/init/Analyze args ---------- ##
+
+		local flag_nuke_repository=
+		local args=()
+		local flag_help="$flag_help"
+		local flag_usage="$flag_usage"
+		while (( $# > 0 )); do case $1 in
+			--force)	flag_force='true'; shift;;
+			--nuke-repository)
+				flag_nuke_repository='true'; shift;;
+			--help)		flag_help='true'; shift;;
+			--usage)	flag_usage='true'; shift;;
+			--)			shift;	break;;
+			--*)		echo "mcsvutils: Invalid option $1" >&2;	usage >&2;	return 2;;
+			-*)
+				if [[ $1 =~ h ]]; then flag_help='true'; fi
+				shift
+				;;
+			*)
+				args+=("$arg_imgpath")
+				shift;;
+		esac done
+		while (( $# > 0 )); do
+			args+=("$arg_imgpath")
+			shift
+		done
+
+		[ -z "$flag_help" ] || { help; return; }
+		[ -z "$flag_usage" ] || { usage; return; }
+		assert_precond || return
+		[ ${#args[@]} -le 0 ] || echo "mcsvutils: Trailing arguments will ignore." >&2
+
+		if [ -s "$MCSVUTILS_IMAGE_REPOSITORY" ]; then
+			[ "$flag_nuke_repository" == 'true' ] || {
+				echo "mcsvutils: Detected that repository exists. To completely remove this repository, add --nuke-repository and run again." >&2
+				return 1
+			}
+			[ "$flag_force" == 'true' ] || {
+				echo "mcsvutils: Choiced to completely destroy the repository." >&2
+				echo "WARNING: Deleting a repository cannot be undone." >&2
+				ask_or_no "continue?" || return
+			}
+			imagerepo_dbnuke
+		fi
+		local repo
+		imagerepo_mkdir || return
+		repo=$(imagerepo_load) || return
+		echo "$repo" | imagerepo_save
+	} # subcommand_image_init
+
+	## image/Analyze args --------------- ##
+
+	local flag_help="$flag_help"
+	local flag_usage="$flag_usage"
+	while (( $# > 0 )); do case $1 in
+		--help)		flag_help='true'; shift;;
+		--usage)	flag_usage='true'; shift;;
+		--*)		echo "mcsvutils: Invalid option $1" >&2;	usage >&2;	return 2;;
+		-*)
+			if [[ $1 =~ h ]]; then flag_help='true'; fi
+			shift
+			;;
+		list)		shift;	subcommand_image_list "$@";	return;;
+		info)		shift;	subcommand_image_info "$@";	return;;
+		add)		shift;	subcommand_image_add "$@";	return;;
+		alias)		shift;	subcommand_image_alias "$@";	return;;
+		remove)		shift;	subcommand_image_remove "$@";	return;;
+		update)		shift;	subcommand_image_update "$@";	return;;
+		init)		shift;	subcommand_image_init "$@";	return;;
+		help)		help;	return;;
+		usage)		usage;	return;;
+		*)			echo "mcsvutils: Invalid subcommand $1" >&2;	usage >&2;	return 2;;
+	esac done
+	[ -z "$flag_help" ] || { help; return; }
+	[ -z "$flag_usage" ] || { usage; return; }
+	echo "mcsvutils: Subcommand not specified" >&2;	usage >&2;	return 2
+} # subcommand_image
+
+subcommand_piston() {
+	## piston/Help ---------------------- ##
+
+	local -r allowed_subcommands=("search" "info" "pull" "help" "usage")
+	usage() {
+		cat <<- __EOF
+		usage: $0 piston <subcommand> ...
+		subcommands: ${allowed_subcommands[@]}
+		__EOF
+	}
+	help() {
+		cat <<- __EOF
+		mcsvutils piston - Manage Minecraft vanilla server images
+
+		usage: $0 piston <subcommand> ...
+		subcommands: ${allowed_subcommands[@]}
+		  search   Search and list images
+		  info     Show server image info
+		  pull     Download image and add to image repository
+		  help     Show this help
+		  usage    Show usage
+
+		For detailed help on each subcommand, add the --help option to subcommand.
+
+		options:
+		  --help | -h Show help
+		  --usage     Show usage
+		  --          Do not parse subsequent options
+		__EOF
+	}
+	## piston/Subcommands --------------- ##
+
+	subcommand_piston_search() {
+		## piston/search/Help --------------- ##
+
+		usage() {
+			cat <<- __EOF
+			usage:
+			  $0 piston search [<options> ...] [<query>]
+			  $0 piston search [<options> ...] --latest
+			query: regexp query of versions
+			__EOF
+		}
+		help() {
+			cat <<- __EOF
+			mcsvutils piston search - Search and list images
+
+			usage:
+			  $0 piston search [<options> ...] [<query>]
+			  $0 piston search [<options> ...] --latest
+			query: regexp query of versions
+
+			options:
+			  --latest
+			    Query latest version
+			  --release[=(true|false)]
+			    Show release version (default: true)
+			    If omit argument, will assign true.
+			  --snapshot[=(true|false)]
+			    Show snapshot version (default: false)
+			    If omit argument, will assign true.
+			  --old-alpha[=(true|false)]
+			    Show old alpha version (default: false)
+			    If omit argument, will assign true.
+			  --old-beta[=(true|false)]
+			    Show old beta version (default: false)
+			    If omit argument, will assign true.
+			  --all | -a
+			    Equivalent --release=true --snapshot=true --old-alpha=true --old-beta=true
+			  --json | -j
+			    Outputs the results in JSON
+			  --help | -h
+			    Show help
+			  --usage
+			    Show usage
+			__EOF
+		}
+
+		## piston/search/Analyze args ------- ##
+
+		local flag_latest=''
+		local flag_release='true'
+		local flag_snapshot='false'
+		local flag_old_alpha='false'
+		local flag_old_beta='false'
+		local flag_json=''
+		local argi=1
+		local arg_query=
+		local args=()
+		local flag_help="$flag_help"
+		local flag_usage="$flag_usage"
+		while (( $# > 0 )); do case $1 in
+			--latest)	flag_latest='true'; shift;;
+			--release=*)
+				flag_release="${1#--release=}"; shift;;
+			--release)	flag_release='true'; shift;;
+			--snapshot=*)
+				flag_snapshot="${1#--snapshot=}"; shift;;
+			--snapshot)	flag_snapshot='true'; shift;;
+			--old-alpha)
+				flag_old_alpha='true'; shift;;
+			--old-alpha=*)
+				flag_old_alpha="${1#--old-alpha=}"; shift;;
+			--old-beta=*)
+				flag_old_beta="${1#--old-beta=}"; shift;;
+			--old-beta)	flag_old_beta='true'; shift;;
+			--all)		flag_release='true';	flag_snapshot='true';	flag_old_alpha='true';	flag_old_beta='true'; shift;;
+			--json)		flag_json='true'; shift;;
+			--help)		flag_help='true'; shift;;
+			--usage)	flag_usage='true'; shift;;
+			--)			shift;	break;;
+			--*)		echo "mcsvutils: Invalid option $1" >&2;	usage >&2;	return 2;;
+			-*)
+				if [[ $1 =~ a ]]; then flag_release='true';	flag_snapshot='true';	flag_old_alpha='true';	flag_old_beta='true'; fi
+				if [[ $1 =~ j ]]; then flag_json='true'; fi
+				if [[ $1 =~ h ]]; then flag_help='true'; fi
+				shift
+				;;
+			*)
+				if [ $argi -eq 1 ]; then
+					arg_query="$1";	((argi++))
+				else
+					args+=("$1")
+				fi
+				shift;;
+		esac done
+		while (( $# > 0 )); do 
+			if [ $argi -eq 1 ]; then
+				arg_query="$1";	((argi++))
+			else
+				args+=("$1")
+			fi
+			shift
+		done
+
+		[ -z "$flag_help" ] || { help; return; }
+		[ -z "$flag_usage" ] || { usage; return; }
+		assert_precond || return
+		[ ${#args[@]} -le 0 ] || echo "mcsvutils: Trailing arguments will ignore." >&2
+		local qflags;	qflags=$(jq -nc --argjson latest "${flag_latest:-false}" --rawfile release <(echo "$flag_release") --rawfile snapshot <(echo "$flag_snapshot") --rawfile old_alpha <(echo "$flag_old_alpha") --rawfile old_beta <(echo "$flag_old_beta") 'def toboolean($e): if ([.=="true", .=="on", .=="yes", ((tonumber?)//0)!=0]|any) then true elif ([.=="false", .=="off", .=="no", ((tonumber?)//1)==0]|any) then false else ($e|error) end; { latest: $latest, release: ($release|toboolean("The value of --release is neither a Boolean value nor a string that can be interpreted as such.")), snapshot: ($snapshot|toboolean("The value of --snapshot is neither a Boolean value nor a string that can be interpreted as such.")), old_alpha: ($old_alpha|toboolean("The value of --old_alpha is neither a Boolean value nor a string that can be interpreted as such.")), old_beta: ($old_beta|toboolean("The value of --old_beta is neither a Boolean value nor a string that can be interpreted as such.")) }') || return
+
+		local piston_manifest;	piston_manifest=$(fetch_piston_manifest) || return
+		local find_result;	find_result=$(echo "$piston_manifest" | jq -c --arg query "$arg_query" --slurpfile flags <(echo "$qflags") '.latest as $latest|.versions|map(select([(if $flags[0].latest then (. as $i|$latest|map(.==$i.id)|any) elif ($query|length>0) then (.id|test($query)) else true end), (.type!="release" or $flags[0].release), (.type!="snapshot" or $flags[0].snapshot), (.type!="old_alpha" or $flags[0].old_alpha), (.type!="old_beta" or $flags[0].old_beta)]|all))') || return
+		if [ "$flag_json" == 'true' ]; then
+			echo "$find_result" | jq -c '.'
+		else
+			echo "$find_result" | jq -r '.[]|"\(.id)"'
+		fi
+	} # subcommand_piston_search
+
+	subcommand_piston_info() {
+		## piston/info/Help ----------------- ##
+
+		usage() {
+			cat <<- __EOF
+			usage:
+			  $0 piston info [<options> ...] [--latest[=(release|snapshot)]]
+			  $0 piston info [<options> ...] <version>
+			version: query of versions
+			__EOF
+		}
+		help() {
+			cat <<- __EOF
+			mcsvutils piston info - Show server image info
+
+			usage:
+			  $0 piston info [<options> ...] [--latest[=(release|snapshot)]]
+			  $0 piston info [<options> ...] <version>
+			version: query of versions
+
+			options:
+			  --latest[=(release|snapshot)]
+			    Query latest version
+			  --json | -j
+			    Outputs the results in JSON
+			  --help | -h
+			    Show help
+			  --usage
+			    Show usage
+			__EOF
+		}
+
+		## piston/info/Analyze args --------- ##
+
+		local flag_latest='off'
+		local flag_json=''
+		local argi=1
+		local arg_version=
+		local args=()
+		local flag_help="$flag_help"
+		local flag_usage="$flag_usage"
+		while (( $# > 0 )); do case $1 in
+			--latest)	flag_latest='release'; shift;;
+			--latest=*)	flag_latest="${1#--latest=}"; shift;;
+			--json)		flag_json='true'; shift;;
+			--help)		flag_help='true'; shift;;
+			--usage)	flag_usage='true'; shift;;
+			--)			shift;	break;;
+			--*)		echo "mcsvutils: Invalid option $1" >&2;	usage >&2;	return 2;;
+			-*)
+				if [[ $1 =~ j ]]; then flag_json='true'; fi
+				if [[ $1 =~ h ]]; then flag_help='true'; fi
+				shift
+				;;
+			*)
+				if [ $argi -eq 1 ]; then
+					arg_version="$1";	((argi++))
+				else
+					args+=("$1")
+				fi
+				shift;;
+		esac done
+		while (( $# > 0 )); do 
+			if [ $argi -eq 1 ]; then
+				arg_version="$1";	((argi++))
+			else
+				args+=("$1")
+			fi
+			shift
+		done
+
+		[ -z "$flag_help" ] || { help; return; }
+		[ -z "$flag_usage" ] || { usage; return; }
+		assert_precond || return
+		[ ${#args[@]} -le 0 ] || echo "mcsvutils: Trailing arguments will ignore." >&2
+		[ $argi -gt 1 ] || [ "$flag_latest" != 'off' ] || flag_latest='release'
+		[ "$flag_latest" == 'off' ] || [ "$flag_latest" == 'release' ] || [ "$flag_latest" == 'snapshot' ] || {
+			echo "mcsvutils: Possible arguments for --latest option are either release or snapshot." >&2
+			return 2
+		}
+
+		local version_url
+		# shellcheck disable=SC2016
+		version_url=$(fetch_piston_manifest | jq -r --arg latest "${flag_latest:-off}" --arg query "$arg_version" '(if $latest=="release" then .latest.release elif $latest=="snapshot" then .latest.snapshot else $query end) as $id|.versions|map({key:.id,value:.})|from_entries|.[$id]//("Version \"\($id)\" not found"|error)|.url') || return
+		local version_info
+		version_info=$(curl -s "$version_url") || return
+
+		if [ "$flag_json" == 'true' ]; then
+			echo "$version_info" | jq -c '.'
+		else
+			echo "$version_info" | jq -r '["\(.type) \(.id)", "Released at \(.releaseTime)", "Server jar: \(.downloads.server.url)", "  size: \(.downloads.server.size)", "  sha1: \(.downloads.server.sha1)", "Java version: \(.javaVersion.majorVersion)"]|join("\n")'
+		fi
+	} # subcommand_piston_info
+
+	subcommand_piston_pull() {
+		## piston/pull/Help ----------------- ##
+
+		usage() {
+			cat <<- __EOF
+			usage:
+			  $0 piston info [<options> ...] [--latest[=(release|snapshot)]]
+			  $0 piston info [<options> ...] <version>
+			version: query of versions
+			__EOF
+		}
+		help() {
+			cat <<- __EOF
+			mcsvutils piston pull - Download image and add to image repository
+
+			usage:
+			  $0 piston pull [<options> ...] [--latest[=(release|snapshot)]]
+			  $0 piston pull [<options> ...] <version>
+			version: query of versions
+
+			options:
+			  --latest[=(release|snapshot)]
+			    Query latest version
+			  --update
+			    Overwrite the corresponding tag if it exists
+			  --out <location>
+			    Download to specified location instead of adding to repository
+			  --help | -h
+			    Show help
+			  --usage
+			    Show usage
+			__EOF
+		}
+
+		## piston/pull/Analyze args --------- ##
+
+		local flag_latest='off'
+		local flag_update=''
+		local opt_out=
+		local argi=1
+		local arg_version=
+		local args=()
+		local flag_help="$flag_help"
+		local flag_usage="$flag_usage"
+		while (( $# > 0 )); do case $1 in
+			--latest=*)	flag_latest="${1#--latest=}"; shift;;
+			--latest)	flag_latest='release'; shift;;
+			--update)	flag_update='true'; shift;;
+			--out=*)	opt_out="${1#--out=}"; shift;;
+			--out)		shift;	opt_out="$1"; shift;;
+			--help)		flag_help='true'; shift;;
+			--usage)	flag_usage='true'; shift;;
+			--)			shift;	break;;
+			--*)		echo "mcsvutils: Invalid option $1" >&2;	usage >&2;	return 2;;
+			-*)
+				if [[ $1 =~ h ]]; then flag_help='true'; fi
+				shift
+				;;
+			*)
+				if [ $argi -eq 1 ]; then
+					arg_version="$1";	((argi++))
+				else
+					args+=("$1")
+				fi
+				shift;;
+		esac done
+		while (( $# > 0 )); do 
+			if [ $argi -eq 1 ]; then
+				arg_version="$1";	((argi++))
+			else
+				args+=("$1")
+			fi
+			shift
+		done
+
+		[ -z "$flag_help" ] || { help; return; }
+		[ -z "$flag_usage" ] || { usage; return; }
+		assert_precond || return
+		[ ${#args[@]} -le 0 ] || echo "mcsvutils: Trailing arguments will ignore." >&2
+		[ $argi -gt 1 ] || [ "$flag_latest" != 'off' ] || flag_latest='release'
+		[ "$flag_latest" == 'off' ] || [ "$flag_latest" == 'release' ] || [ "$flag_latest" == 'snapshot' ] || {
+			echo "mcsvutils: Possible arguments for --latest option are either release or snapshot." >&2
+			return 2
+		}
+
+		local piston_manifest;	piston_manifest=$(fetch_piston_manifest) || return
+		local version_url;	version_url=$(echo "$piston_manifest" | jq -r --arg latest "${flag_latest:-off}" --arg query "$arg_version" '(if $latest=="release" then .latest.release elif $latest=="snapshot" then .latest.snapshot else $query end) as $id|.versions|map({key:.id,value:.})|from_entries|.[$id]//("Version \"\($id)\" not found"|error)|.url') || return
+		local aliases;	aliases=$(echo "$piston_manifest" | jq -r --arg latest "${flag_latest:-off}" --arg query "$arg_version" '(if $latest=="release" then .latest.release elif $latest=="snapshot" then .latest.snapshot else $query end) as $id|[(.versions|map({key:.id,value:.})|from_entries|.[$id].id), if .latest.release==$id then "latest" else empty end, if .latest.snapshot==$id then "snapshot" else empty end]') || return
+		local version_info;	version_info=$(curl -s "$version_url") || return
+		local version_source;	version_source=$(echo "$version_info" | jq -r '.downloads.server.url') || return
+		local version_fname;	version_fname=$(basename "$version_source")
+
+		local repo
+		[ -n "$opt_out" ] || {
+			repo=$(imagerepo_load) || return
+			local repo_err;	repo_err=$(echo "$repo" | imagerepo_check_integrity) || {
+				echo "mcsvutils: Repository integrity error: $(echo "$repo_err" | integrity_errstr)" >&2
+				return 1
+			}
+			echo "$repo" | jq -ec --argjson force "${flag_update:-false}" --argjson aliases "$aliases" '(if $force then [] else .aliases end+.images)|all(.id as $item|$aliases|all(.!=$item))' >/dev/null || { echo "mcsvutils: alias conflicts with existing tag" >&2; [ "$flag_update" == 'true' ] || echo "note: To overwrite an existing alias, use the --update flag" >&2; return 1; }
+		}
+
+		local temp_dir
+		temp_dir=$(mktemp -dt "mcsvutils.XXXXXXXXXX.tmp") || return
+		( cd "$temp_dir" && wget --quiet --show-progress --progress=bar:force -- "$version_source" ) || return
+		local image_size;	image_size=$(wc -c -- "$temp_dir/$version_fname")
+		echo "$version_info" | jq -e --arg imgsize "$image_size" '(.downloads.server.size) as $src_imgsize|($imgsize|gsub("(?<s>[0-9]+) .*$"; .s)|tonumber) as $act_imgsize|$src_imgsize==$act_imgsize' >/dev/null || { echo "mcsvutils: File sizes do not match." >&2; return 1; }
+		sha1sum --quiet -c <<<"$(echo "$version_info" | jq -r '.downloads.server.sha1') *$temp_dir/$version_fname" || return
+
+		if [ -z "$opt_out" ]; then
+			local img_id;	img_id=$(echo "$repo" | imagerepo_get_new_imageid) || return
+			local img_path
+			imagerepo_mkdir || return
+			! [ -e "${MCSVUTILS_IMAGE_REPOSITORY:?}/$img_id/$version_fname" ] || { echo "mcsvutils: An entry already exists at the location in the repository. Abort." >&2; return 1; }
+			mkdir -p "$MCSVUTILS_IMAGE_REPOSITORY/$img_id"
+			chmod u=rwx,go=rx "$MCSVUTILS_IMAGE_REPOSITORY/$img_id" || return
+			cp -t "$MCSVUTILS_IMAGE_REPOSITORY/$img_id" "$temp_dir/$version_fname" || return
+			chmod u=rw,go=r "$MCSVUTILS_IMAGE_REPOSITORY/$img_id/$version_fname" || return
+			img_path="$img_id/$version_fname"
+			local img_sha256;	img_sha256=$(sha256sum -b "$MCSVUTILS_IMAGE_REPOSITORY/${img_path:?}")
+			[ -n "$img_sha256" ] || { rm -rf -- "${MCSVUTILS_IMAGE_REPOSITORY:?}/${img_id:?}"; return 1; }
+			repo=$(echo "$repo" | jq -c --slurpfile vinfo <(echo "$version_info") --arg imgid "$img_id" --arg imgpath "$img_path" --arg imgsha256 "$img_sha256" --argjson aliases "$aliases" '(.images|=.+[{id:$imgid,path:$imgpath,size:$vinfo[0].downloads.server.size,sha1:$vinfo[0].downloads.server.sha1,sha256:($imgsha256|gsub("(?<s>[0-9a-f]+) .*$";.s)) }])|.aliases|=(map(select(.id as $i|$aliases|all(.!=$i)))+($aliases|map({id: .,reference: $imgid})))') || { rm -rf -- "${MCSVUTILS_IMAGE_REPOSITORY:?}/${img_id:?}"; return 1; }
+			echo "$repo" | imagerepo_save
+		else
+			mv -i -T "$temp_dir/$version_fname" "$opt_out" || return
+		fi
+		rm -rf "${temp_dir:?}"
+	} # subcommand_piston_pull
+
+	## piston/Analyze args -------------- ##
+
+	local flag_help="$flag_help"
+	local flag_usage="$flag_usage"
+	while (( $# > 0 )); do case $1 in
+		--help)		flag_help='true'; shift;;
+		--usage)	flag_usage='true'; shift;;
+		--*)		echo "mcsvutils: Invalid option $1" >&2;	usage >&2;	return 2;;
+		-*)
+			if [[ $1 =~ h ]]; then flag_help='true'; fi
+			shift
+			;;
+		search)		shift;	subcommand_piston_search "$@";	return;;
+		info)		shift;	subcommand_piston_info "$@";	return;;
+		pull)		shift;	subcommand_piston_pull "$@";	return;;
+		help)		help;	return;;
+		usage)		usage;	return;;
+		*)			echo "mcsvutils: Invalid subcommand $1" >&2;	usage >&2;	return 2;;
+	esac done
+	[ -z "$flag_help" ] || { help; return; }
+	[ -z "$flag_usage" ] || { usage; return; }
+	echo "mcsvutils: Subcommand not specified" >&2;	usage >&2;	return 2
+} # subcommand_piston
+
+subcommand_spigot() {
+	## spigot/Help ---------------------- ##
+
+	local -r allowed_subcommands=("build" "help" "usage")
+	usage() {
+		cat <<- __EOF
+		usage: $0 spigot <subcommand> ...
+		subcommands: ${allowed_subcommands[@]}
+		__EOF
+	}
+	help() {
+		cat <<- __EOF
+		mcsvutils spigot - Manage CraftBukkit/Spigot server images
+
+		usage: $0 spigot <subcommand> ...
+		subcommands: ${allowed_subcommands[@]}
+		  build    Build Craftbukkit/Spigot image
+		  help     Show this help
+		  usage    Show usage
+
+		For detailed help on each subcommand, add the --help option to subcommand.
+
+		options:
+		  --help | -h Show help
+		  --usage     Show usage
+		  --          Do not parse subsequent options
+		__EOF
+	}
+	## spigot/Subcommands --------------- ##
+
+	subcommand_spigot_build() {
+		## spigot/build/Help ---------------- ##
+
+		usage() {
+			cat <<- __EOF
+			usage:
+			  $0 spigot build [<options> ...] [--latest]
+			  $0 spigot build [<options> ...] <version>
+			version: query of versions
+			__EOF
+		}
+		help() {
+			cat <<- __EOF
+			mcsvutils spigot build - Download image and add to image repository
+
+			usage:
+			  $0 spigot build [<options> ...] [--latest]
+			  $0 spigot build [<options> ...] <version>
+			version: query of versions
+
+			options:
+			  --latest
+			    Query latest version
+			  --craftbukkit
+			    Select to compile Craftbukkit
+			  --spigot
+			    Select to compile Spigot
+			  --jre <path>
+			    Java executable file used to run build tool
+			  --update
+			    Overwrite the corresponding tag if it exists
+			  --out <location>
+			    Download to specified location instead of adding to repository
+			  --help | -h
+			    Show help
+			  --usage
+			    Show usage
+			__EOF
+		}
+
+		## spigot/build/Analyze args -------- ##
+
+		local flag_latest=
+		local flag_compile=''
+		local opt_jre=
+		local flag_update=
+		local opt_out=
+		local argi=1
+		local arg_version=
+		local args=()
+		local flag_help="$flag_help"
+		local flag_usage="$flag_usage"
+		while (( $# > 0 )); do case $1 in
+			--latest)	flag_latest='true'; shift;;
+			--craftbukkit)
+				flag_compile='craftbukkit'; shift;;
+			--spigot)	flag_compile='spigot'; shift;;
+			--jre=*)	opt_jre="${1#--jre=}"; shift;;
+			--jre)		shift;	opt_jre="$1"; shift;;
+			--update)	flag_update='true'; shift;;
+			--out=*)	opt_out="${1#--out=}"; shift;;
+			--out)		shift;	opt_out="$1"; shift;;
+			--help)		flag_help='true'; shift;;
+			--usage)	flag_usage='true'; shift;;
+			--)			shift;	break;;
+			--*)		echo "mcsvutils: Invalid option $1" >&2;	usage >&2;	return 2;;
+			-*)
+				if [[ $1 =~ h ]]; then flag_help='true'; fi
+				shift
+				;;
+			*)
+				if [ $argi -eq 1 ]; then
+					arg_version="$1";	((argi++))
+				else
+					args+=("$1")
+				fi
+				shift;;
+		esac done
+		while (( $# > 0 )); do 
+			if [ $argi -eq 1 ]; then
+				arg_version="$1";	((argi++))
+			else
+				args+=("$1")
+			fi
+			shift
+		done
+
+		[ -z "$flag_help" ] || { help; return; }
+		[ -z "$flag_usage" ] || { usage; return; }
+		assert_precond || return
+		local nargs
+		nargs=$(jq -nc --argjson latest "${flag_latest:-false}" --arg compile_type "$flag_compile" --arg jre "$opt_jre" --argjson update "${flag_update:-false}" --arg out_dir "$opt_out" --arg version "$arg_version" '{ latest: $latest, version: (if ($version|length > 0) then $version else null end), compile_type: (if (["", "craftbukkit", "spigot"]|map($compile_type==.)|any) then $compile_type else ("Invalid compile type option"|error) end), jre: (if ($jre|length > 0) then $jre else null end), update: $update, out_dir: (if ($out_dir|length > 0) then $out_dir else null end) }') || return 2
+
+		local repo
+		[ -n "$opt_out" ] || {
+			repo=$(imagerepo_load) || return
+			local repo_err;	repo_err=$(echo "$repo" | imagerepo_check_integrity) || {
+				echo "mcsvutils: Repository integrity error: $(echo "$repo_err" | integrity_errstr)" >&2
+				return 1
+			}
+		}
+
+		local invocation;	invocation=$(echo "$nargs" | jq -r '[(.jre//"java"), "-jar", "BuildTools.jar", (if .compile_type=="craftbukkit" then ("--compile", "CRAFTBUKKIT") elif .compile_type=="spigot" then ("--compile", "SPIGOT") else empty end), (if (.latest|not) and (.version|type!="null") then ("--rev", .version) else empty end), (if (.out_dir|type!="null") then ("--output-dir", .out_dir) else empty end)]|@sh') || return
+		local workingdir;	workingdir=$(mktemp -dt mcsvutils.XXXXXXXXXX) || return
+		# shellcheck disable=SC2086
+		( cd "$workingdir" && wget --quiet --show-progress --progress=bar:force -- "$SPIGOT_BUILDTOOLS_LOCATION" && eval $invocation) || return
+		tail "$workingdir/BuildTools.log.txt" | grep 'Success! Everything completed successfully\. Copying final \.jar files now\.' >/dev/null 2>&1 || { echo "mcsvutils: Something went wrong in building. Abort." >&2; return 1; }
+
+		[ -z "$opt_out" ] || { rm -rf "${workingdir:?}"; return 0; }
+		local resultjar
+		resultjar=$(tail "$workingdir/BuildTools.log.txt" | jq -Rsr 'split("\n")|map(select(test("- Saved as")))|if length>0 then . else ("Result jar can'\''t detected"|error) end|.[0]|capture("- Saved as (?<f>.*\\.jar)")|.f') || return
+		resultjar=$(basename -s .jar "$resultjar") || return
+		[ -f "$workingdir/${resultjar}.jar" ] || { echo "mcsvutils: Result jar not found" >&2; return 1; }
+
+		# shellcheck disable=SC2016
+		echo "$repo" | jq -ec --argjson force "${flag_update:-false}" --arg jarname "$resultjar" --slurpfile args <(echo "$nargs") '[$jarname, (if ($args[0].version|type=="null") or ($args[0].version=="latest") then "spigot" else empty end)] as $aliases|(if $force then [] else .aliases end+.images)|all(.id as $item|$aliases|all(.!=$item))' >/dev/null || { echo "mcsvutils: alias conflicts with existing tag" >&2; [ "$flag_update" == 'true' ] || echo "note: To overwrite an existing alias, use the --update flag" >&2; return 1; }
+
+		local img_id;	img_id=$(echo "$repo" | imagerepo_get_new_imageid) || return
+		local img_path
+		imagerepo_mkdir || return
+		! [ -e "${MCSVUTILS_IMAGE_REPOSITORY:?}/$img_id/${resultjar}.jar" ] || { echo "mcsvutils: An entry already exists at the location in the repository. Abort." >&2; return 1; }
+		mkdir -p "$MCSVUTILS_IMAGE_REPOSITORY/$img_id"
+		chmod u=rwx,go=rx "$MCSVUTILS_IMAGE_REPOSITORY/$img_id" || return
+		cp -t "$MCSVUTILS_IMAGE_REPOSITORY/$img_id" "$workingdir/${resultjar}.jar" || return
+		chmod u=rw,go=r "$MCSVUTILS_IMAGE_REPOSITORY/$img_id/${resultjar}.jar" || return
+		img_path="$img_id/${resultjar}.jar"
+		local img_sha1;	img_sha1=$(sha1sum -b "$MCSVUTILS_IMAGE_REPOSITORY/${img_path:?}" &)
+		local img_sha256;	img_sha256=$(sha256sum -b "$MCSVUTILS_IMAGE_REPOSITORY/${img_path:?}" &)
+		local img_size;	img_size=$(wc -c -- "$MCSVUTILS_IMAGE_REPOSITORY/${img_path:?}" &)
+		wait
+		{ [ -n "$img_sha1" ] && [ -n "$img_sha256" ] && [ -n "$img_size" ]; } || {
+			rm -rf -- "${MCSVUTILS_IMAGE_REPOSITORY:?}/${img_id:?}"
+			return 1
+		}
+
+		repo=$(echo "$repo" | jq -c --arg imgid "$img_id" --arg jarname "$resultjar" --rawfile imgpath <(echo "$img_path") --rawfile imgsize <(echo "$img_size") --rawfile imgsha1 <(echo "$img_sha1") --rawfile imgsha256 <(echo "$img_sha256") --slurpfile args <(echo "$nargs") '[$jarname, (if ($args[0].version|type=="null") or ($args[0].version=="latest") then "spigot" else empty end)] as $aliases|(.images|=.+[{id:$imgid,path:$imgpath,size:($imgsize|gsub("(?<s>[0-9]+) .*$";.s)|tonumber),sha1:($imgsha1|gsub("(?<s>[0-9a-f]+) .*$";.s)),sha256:($imgsha256|gsub("(?<s>[0-9a-f]+) .*$";.s))}])|.aliases|=(map(select(.id as $i|$aliases|all(.!=$i)))+($aliases|map({id:.,reference:$imgid})))') || { rm -rf -- "${MCSVUTILS_IMAGE_REPOSITORY:?}/${img_id:?}"; return 1; }
+		echo "$repo" | imagerepo_save
+		rm -rf "${workingdir:?}"
+	} # subcommand_spigot_build
+
+	## spigot/Analyze args -------------- ##
+
+	local flag_help="$flag_help"
+	local flag_usage="$flag_usage"
+	while (( $# > 0 )); do case $1 in
+		--help)		flag_help='true'; shift;;
+		--usage)	flag_usage='true'; shift;;
+		--*)		echo "mcsvutils: Invalid option $1" >&2;	usage >&2;	return 2;;
+		-*)
+			if [[ $1 =~ h ]]; then flag_help='true'; fi
+			shift
+			;;
+		build)		shift;	subcommand_spigot_build "$@";	return;;
+		help)		help;	return;;
+		usage)		usage;	return;;
+		*)			echo "mcsvutils: Invalid subcommand $1" >&2;	usage >&2;	return 2;;
+	esac done
+	[ -z "$flag_help" ] || { help; return; }
+	[ -z "$flag_usage" ] || { usage; return; }
+	echo "mcsvutils: Subcommand not specified" >&2;	usage >&2;	return 2
+} # subcommand_spigot
+
+## Analyze commandline args --------- ##
+
+local flag_help
+local flag_usage
+while (( $# > 0 )); do case $1 in
+	--version)	version;	return;;
+	--help)		flag_help='true'; shift;;
+	--usage)	flag_usage='true'; shift;;
+	--*)		echo "mcsvutils: Invalid option $1" >&2;	usage >&2;	return 2;;
+	-*)
+		if [[ $1 =~ h ]]; then flag_help='true'; fi
+		shift
+		;;
+	profile)	shift;	subcommand_profile "$@";	return;;
+	server)		shift;	subcommand_server "$@";	return;;
+	image)		shift;	subcommand_image "$@";	return;;
+	piston)		shift;	subcommand_piston "$@";	return;;
+	spigot)		shift;	subcommand_spigot "$@";	return;;
+	version)	version;	return;;
+	help)		help;	return;;
+	usage)		usage;	return;;
+	*)			echo "mcsvutils: Invalid subcommand $1" >&2;	usage >&2;	return 2;;
+esac done
+[ -z "$flag_help" ] || { help; return; }
+[ -z "$flag_usage" ] || { usage; return; }
+echo "mcsvutils: Subcommand not specified" >&2;	usage >&2;	return 2
+} # __main
+__main "$@"
